@@ -68,6 +68,23 @@ app.get('/courses/:id/participants', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// NEW: ADD SINGLE PARTICIPANT (Manual Entry)
+app.post('/participants', async (req, res) => {
+  const { courseId, fullName, phone, email, age, gender, confNo } = req.body;
+  try {
+    // Check duplicates
+    const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)", [courseId, fullName]);
+    if (check.rows.length > 0) return res.status(409).json({ error: "Student already exists in this course." });
+
+    await pool.query(
+      "INSERT INTO participants (course_id, full_name, phone_number, email, age, gender, conf_no, status) VALUES ($1, $2, $3, $4, $5, $6, $7, 'No Response')",
+      [courseId, fullName, phone, email, age, gender, confNo]
+    );
+    res.json({ message: "Student added successfully" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// BULK IMPORT
 app.post('/courses/:id/import', async (req, res) => {
   const { id } = req.params;
   const { students } = req.body;
@@ -92,12 +109,12 @@ app.post('/courses/:id/import', async (req, res) => {
 
 app.put('/participants/:id', async (req, res) => {
   const { id } = req.params;
-  const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language } = req.body;
+  const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating } = req.body;
   try {
     const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null);
     const result = await pool.query(
-      "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9, discourse_language=$10 WHERE participant_id=$11 RETURNING *",
-      [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), discourse_language, id]
+      "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9 WHERE participant_id=$10 RETURNING *",
+      [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), id]
     );
     res.json(result.rows[0]);
   } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found." }); res.status(500).json({ error: err.message }); }
@@ -140,10 +157,9 @@ app.post('/check-in', async (req, res) => {
   }
 });
 
-// --- STATS (UPDATED: Language Breakdown) ---
+// --- STATS ---
 app.get('/courses/:id/stats', async (req, res) => {
   try {
-    // 1. Basic Counts & Applicant Types
     const result = await pool.query("SELECT status, conf_no FROM participants WHERE course_id = $1", [req.params.id]);
     const stats = { arrived: 0, no_response: 0, cancelled: 0, old_students: 0, new_students: 0, servers: 0, languages: [] };
     
@@ -160,7 +176,6 @@ app.get('/courses/:id/stats', async (req, res) => {
       }
     });
 
-    // 2. Language Breakdown (Only for Arrived students)
     const langResult = await pool.query(
       "SELECT discourse_language, COUNT(*) as count FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY count DESC",
       [req.params.id]
