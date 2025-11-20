@@ -69,6 +69,7 @@ app.post('/courses/:id/import', async (req, res) => {
       if (name.length < 1) continue;
       const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND (LOWER(full_name) = LOWER($2) OR (conf_no IS NOT NULL AND conf_no = $3))", [id, name, s.confNo]);
       if (check.rows.length > 0) { skipped++; } else {
+        // Ensure all fields (including conf_no) are passed correctly
         await pool.query(
           "INSERT INTO participants (course_id, full_name, phone_number, email, status, age, gender, courses_info, conf_no) VALUES ($1, $2, $3, $4, 'No Response', $5, $6, $7, $8)", 
           [id, name, s.phone||'', s.email||'', s.age||null, s.gender||null, s.courses||null, s.confNo||null]
@@ -130,17 +131,22 @@ app.post('/check-in', async (req, res) => {
   }
 });
 
-// --- STATS ---
+// --- STATS (FIXED: Trim spaces from Conf No) ---
 app.get('/courses/:id/stats', async (req, res) => {
   try {
     const result = await pool.query("SELECT status, conf_no FROM participants WHERE course_id = $1", [req.params.id]);
     const stats = { arrived: 0, no_response: 0, cancelled: 0, old_students: 0, new_students: 0, servers: 0 };
+    
     result.rows.forEach(p => {
       if (p.status === 'Arrived') stats.arrived++;
       else if (p.status === 'No Response') stats.no_response++;
       else if (p.status === 'Cancelled') stats.cancelled++;
-      if (p.status === 'Arrived' && p.conf_no) {
-        const code = p.conf_no.toUpperCase();
+      
+      // Count ALL students (not just arrived) for applicant types if needed, 
+      // but typically we only count those who are confirmed/arrived.
+      // Removing 'Arrived' check if you want to see stats for EVERYONE uploaded.
+      if (p.conf_no) {
+        const code = p.conf_no.trim().toUpperCase(); // FIX: Trim spaces
         if (code.startsWith('OM') || code.startsWith('OF')) stats.old_students++;
         else if (code.startsWith('NM') || code.startsWith('NF')) stats.new_students++;
         else if (code.startsWith('SM') || code.startsWith('SF')) stats.servers++;
@@ -159,18 +165,26 @@ app.post('/expenses', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/participants/:id/expenses', async (req, res) => {
+// NEW: EDIT EXPENSE
+app.put('/expenses/:id', async (req, res) => {
+  const { expense_type, amount } = req.body;
   try {
-    const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]);
-    res.json(result.rows);
+    const result = await pool.query("UPDATE expenses SET expense_type=$1, amount=$2 WHERE expense_id=$3 RETURNING *", [expense_type, amount, req.params.id]);
+    res.json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// NEW: DELETE EXPENSE ROUTE
 app.delete('/expenses/:id', async (req, res) => {
   try {
     await pool.query("DELETE FROM expenses WHERE expense_id = $1", [req.params.id]);
     res.json({ message: "Expense deleted" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/participants/:id/expenses', async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]);
+    res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
