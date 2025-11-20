@@ -32,7 +32,20 @@ app.get('/courses', async (req, res) => {
     res.status(500).json({ error: "Database error fetching courses" });
   }
 });
-
+// 1.5 Create New Course
+app.post('/courses', async (req, res) => {
+  try {
+    const { courseName, teacherName, startDate, endDate } = req.body;
+    const result = await pool.query(
+      "INSERT INTO courses (course_name, teacher_name, start_date, end_date) VALUES ($1, $2, $3, $4) RETURNING *",
+      [courseName, teacherName, startDate, endDate]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 // 2. Get Participants for a specific Course (For the Student Dropdown)
 // *** THIS WAS THE MISSING PART ***
 app.get('/courses/:id/participants', async (req, res) => {
