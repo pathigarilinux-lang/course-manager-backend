@@ -5,9 +5,9 @@ const { Pool } = require('pg');
 
 const app = express();
 
-// --- MIDDLEWARE (CRITICAL) ---
+// --- MIDDLEWARE ---
 app.use(cors());
-app.use(express.json()); // <--- This line is REQUIRED for "Create Course" to work!
+app.use(express.json());
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -29,23 +29,19 @@ app.get('/courses', async (req, res) => {
   }
 });
 
-// 2. CREATE NEW COURSE (The missing/broken part)
+// 2. CREATE NEW COURSE
 app.post('/courses', async (req, res) => {
   try {
     const { courseName, teacherName, startDate, endDate } = req.body;
-    
-    // Validation check
     if (!courseName || !startDate || !endDate) {
       return res.status(400).json({ error: "Missing fields" });
     }
-
     const result = await pool.query(
       "INSERT INTO courses (course_name, teacher_name, start_date, end_date) VALUES ($1, $2, $3, $4) RETURNING *",
       [courseName, teacherName, startDate, endDate]
     );
     res.json(result.rows[0]);
   } catch (err) {
-    console.error("Create Course Error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -61,7 +57,7 @@ app.get('/courses/:id/participants', async (req, res) => {
   }
 });
 
-// 4. BULK IMPORT STUDENTS
+// 4. BULK IMPORT (WITH DUPLICATE PROTECTION)
 app.post('/courses/:id/import', async (req, res) => {
   const { id } = req.params;
   const { students } = req.body;
@@ -70,19 +66,40 @@ app.post('/courses/:id/import', async (req, res) => {
     return res.status(400).json({ error: "Invalid data format" });
   }
 
+  let added = 0;
+  let skipped = 0;
+
   try {
     for (const s of students) {
-      if (s.name && s.name.trim() !== "") {
-        // Insert ignoring errors if phone/email is missing
+      // 1. Clean the name
+      const name = s.name ? s.name.trim() : "";
+      if (name.length < 1) continue;
+
+      // 2. CHECK IF EXISTS (The Protection Logic)
+      // We check if this Name exists in THIS Course
+      const check = await pool.query(
+        "SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)",
+        [id, name]
+      );
+
+      if (check.rows.length > 0) {
+        // EXISTS: Do nothing. Preserve existing check-in data.
+        skipped++;
+      } else {
+        // DOES NOT EXIST: Insert new record
         await pool.query(
           "INSERT INTO participants (course_id, full_name, phone_number, email, status) VALUES ($1, $2, $3, $4, 'No Response')",
-          [id, s.name, s.phone || '', s.email || '']
+          [id, name, s.phone || '', s.email || '']
         );
+        added++;
       }
     }
-    res.json({ message: "Import successful" });
+    
+    console.log(`Import: Added ${added}, Skipped ${skipped} duplicates.`);
+    res.json({ message: `Import complete. Added: ${added}. Skipped (Duplicates): ${skipped}` });
+    
   } catch (err) {
-    console.error(err);
+    console.error("Import Error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -103,12 +120,9 @@ app.post('/check-in', async (req, res) => {
     
     const result = await pool.query(query, values);
     
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Student not found" });
-    }
+    if (result.rows.length === 0) return res.status(404).json({ error: "Student not found" });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
     if (err.code === '23505') { 
       res.status(409).json({ error: "Duplicate assignment! Room/Seat/Token already taken." });
     } else {
