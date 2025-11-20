@@ -30,6 +30,36 @@ app.post('/courses', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// NEW: RESET COURSE (Delete Students & Expenses, Keep Course)
+app.delete('/courses/:id/reset', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Delete Expenses first (foreign key)
+    await client.query('DELETE FROM expenses WHERE course_id = $1', [req.params.id]);
+    // Delete Participants
+    await client.query('DELETE FROM participants WHERE course_id = $1', [req.params.id]);
+    await client.query('COMMIT');
+    res.json({ message: "Course data reset successfully" });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// NEW: DELETE COURSE (Remove Completely)
+app.delete('/courses/:id', async (req, res) => {
+  try {
+    // Cascading delete usually handles children, but we do it explicitly to be safe
+    await pool.query('DELETE FROM expenses WHERE course_id = $1', [req.params.id]);
+    await pool.query('DELETE FROM participants WHERE course_id = $1', [req.params.id]);
+    await pool.query('DELETE FROM courses WHERE course_id = $1', [req.params.id]);
+    res.json({ message: "Course deleted" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- PARTICIPANTS ---
 app.get('/courses/:id/participants', async (req, res) => {
   try {
@@ -38,7 +68,6 @@ app.get('/courses/:id/participants', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// BULK IMPORT
 app.post('/courses/:id/import', async (req, res) => {
   const { id } = req.params;
   const { students } = req.body;
@@ -58,14 +87,14 @@ app.post('/courses/:id/import', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// EDIT PARTICIPANT (Updated with Conf No)
+// EDIT PARTICIPANT (Now includes Dhamma Seat!)
 app.put('/participants/:id', async (req, res) => {
   const { id } = req.params;
-  const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no } = req.body;
+  const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no } = req.body;
   try {
     const result = await pool.query(
-      "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7 WHERE participant_id=$8 RETURNING *",
-      [full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, id]
+      "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8 WHERE participant_id=$9 RETURNING *",
+      [full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, id]
     );
     res.json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -78,18 +107,18 @@ app.delete('/participants/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- CHECK-IN (Updated with Conf No) ---
+// --- CHECK-IN (Now includes Dhamma Seat!) ---
 app.post('/check-in', async (req, res) => {
-  const { courseId, participantId, roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo } = req.body;
+  const { courseId, participantId, roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat } = req.body;
   try {
     const query = `
       UPDATE participants 
       SET status = 'Arrived', room_no = $1, dining_seat_no = $2, laundry_token_no = $3, 
           mobile_locker_no = $4, valuables_locker_no = $5, discourse_language = $6,
-          pagoda_cell_no = $7, laptop_details = $8, conf_no = $9
-      WHERE participant_id = $10 AND course_id = $11 RETURNING *;
+          pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10
+      WHERE participant_id = $11 AND course_id = $12 RETURNING *;
     `;
-    const values = [roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language||'English', pagodaCell, laptop, confNo, participantId, courseId];
+    const values = [roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language||'English', pagodaCell, laptop, confNo, dhammaSeat, participantId, courseId];
     const result = await pool.query(query, values);
     if (result.rows.length === 0) return res.status(404).json({ error: "Student not found" });
     res.json(result.rows[0]);
@@ -99,7 +128,7 @@ app.post('/check-in', async (req, res) => {
   }
 });
 
-// --- EXPENSES & REPORTS ---
+// --- EXPENSES ---
 app.post('/expenses', async (req, res) => {
   const { courseId, participantId, type, amount } = req.body;
   try {
@@ -115,18 +144,9 @@ app.get('/participants/:id/expenses', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// NEW: Financial Summary Report
 app.get('/courses/:id/financial-report', async (req, res) => {
   try {
-    const query = `
-      SELECT p.full_name, p.room_no, p.dining_seat_no, COALESCE(SUM(e.amount), 0) as total_due
-      FROM participants p
-      LEFT JOIN expenses e ON p.participant_id = e.participant_id
-      WHERE p.course_id = $1
-      GROUP BY p.participant_id, p.full_name, p.room_no, p.dining_seat_no
-      HAVING SUM(e.amount) > 0
-      ORDER BY p.full_name ASC;
-    `;
+    const query = `SELECT p.full_name, p.room_no, p.dining_seat_no, COALESCE(SUM(e.amount), 0) as total_due FROM participants p LEFT JOIN expenses e ON p.participant_id = e.participant_id WHERE p.course_id = $1 GROUP BY p.participant_id, p.full_name, p.room_no, p.dining_seat_no HAVING SUM(e.amount) > 0 ORDER BY p.full_name ASC`;
     const result = await pool.query(query, [req.params.id]);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
