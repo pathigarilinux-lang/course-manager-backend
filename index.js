@@ -7,9 +7,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// SECURITY: Simple API Key for your website integration
-const INTEGRATION_KEY = process.env.INTEGRATION_KEY || "vridhamma_secret_key_123"; 
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -157,22 +154,32 @@ app.post('/check-in', async (req, res) => {
   }
 });
 
-// --- STATS (UPDATED: DETAILED SPLIT + GENDER LANG) ---
+// --- STATS (UPDATED: Status Split by Gender) ---
 app.get('/courses/:id/stats', async (req, res) => {
   try {
-    const result = await pool.query("SELECT status, conf_no FROM participants WHERE course_id = $1", [req.params.id]);
-    
-    // New Stats Structure
+    const result = await pool.query("SELECT status, conf_no, gender FROM participants WHERE course_id = $1", [req.params.id]);
     const stats = { 
       arrived: 0, no_response: 0, cancelled: 0, 
       om: 0, of: 0, nm: 0, nf: 0, sm: 0, sf: 0,
+      arrived_m: 0, arrived_f: 0, pending_m: 0, pending_f: 0, cancelled_m: 0, cancelled_f: 0,
       languages: [] 
     };
     
     result.rows.forEach(p => {
-      if (p.status === 'Arrived') stats.arrived++;
-      else if (p.status === 'No Response') stats.no_response++;
-      else if (p.status === 'Cancelled') stats.cancelled++;
+      const isMale = p.gender && p.gender.toLowerCase() === 'male';
+      
+      if (p.status === 'Arrived') {
+        stats.arrived++;
+        if(isMale) stats.arrived_m++; else stats.arrived_f++;
+      }
+      else if (p.status === 'No Response') {
+        stats.no_response++;
+        if(isMale) stats.pending_m++; else stats.pending_f++;
+      }
+      else if (p.status === 'Cancelled') {
+        stats.cancelled++;
+        if(isMale) stats.cancelled_m++; else stats.cancelled_f++;
+      }
       
       if (p.status === 'Arrived' && p.conf_no) {
         const code = p.conf_no.trim().toUpperCase();
@@ -185,17 +192,11 @@ app.get('/courses/:id/stats', async (req, res) => {
       }
     });
 
-    // Language Query (No change needed, already split)
     const langResult = await pool.query(
-      `SELECT 
-        discourse_language,
-        COUNT(*) as total,
+      `SELECT discourse_language, COUNT(*) as total,
         COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count,
         COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count
-      FROM participants 
-      WHERE course_id = $1 AND status = 'Arrived' 
-      GROUP BY discourse_language 
-      ORDER BY total DESC`,
+      FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY total DESC`,
       [req.params.id]
     );
     stats.languages = langResult.rows;
@@ -241,41 +242,6 @@ app.get('/courses/:id/financial-report', async (req, res) => {
     const result = await pool.query(query, [req.params.id]);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// --- LIVE INTEGRATION WEBHOOK (NEW) ---
-app.post('/api/integration/add-student', async (req, res) => {
-  const { apiKey, courseId, student } = req.body;
-  
-  // 1. Verify Security Key
-  if (apiKey !== INTEGRATION_KEY) {
-    return res.status(401).json({ error: "Unauthorized: Invalid API Key" });
-  }
-
-  if (!courseId || !student || !student.fullName) {
-    return res.status(400).json({ error: "Missing student data" });
-  }
-
-  try {
-    // 2. Check Duplicate
-    const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)", [courseId, student.fullName]);
-    
-    if (check.rows.length > 0) {
-      return res.json({ message: "Student already exists (Skipped)" });
-    }
-
-    // 3. Insert Student
-    await pool.query(
-      "INSERT INTO participants (course_id, full_name, phone_number, email, age, gender, conf_no, status) VALUES ($1, $2, $3, $4, $5, $6, $7, 'No Response')",
-      [courseId, student.fullName, student.phone, student.email, student.age, student.gender, student.confNo]
-    );
-
-    res.json({ message: "Student successfully added from Website!" });
-    
-  } catch (err) {
-    console.error("Webhook Error:", err);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 const PORT = process.env.PORT || 3000;
