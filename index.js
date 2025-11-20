@@ -14,7 +14,7 @@ const pool = new Pool({
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 
-// --- COURSES (UPDATED: Returns Stats for Dashboard) ---
+// --- COURSES ---
 app.get('/courses', async (req, res) => {
   try {
     const query = `
@@ -138,6 +138,37 @@ app.post('/check-in', async (req, res) => {
     }
     res.status(500).json({ error: err.message });
   }
+});
+
+// --- STATS (UPDATED: Language Breakdown) ---
+app.get('/courses/:id/stats', async (req, res) => {
+  try {
+    // 1. Basic Counts & Applicant Types
+    const result = await pool.query("SELECT status, conf_no FROM participants WHERE course_id = $1", [req.params.id]);
+    const stats = { arrived: 0, no_response: 0, cancelled: 0, old_students: 0, new_students: 0, servers: 0, languages: [] };
+    
+    result.rows.forEach(p => {
+      if (p.status === 'Arrived') stats.arrived++;
+      else if (p.status === 'No Response') stats.no_response++;
+      else if (p.status === 'Cancelled') stats.cancelled++;
+      
+      if (p.status === 'Arrived' && p.conf_no) {
+        const code = p.conf_no.trim().toUpperCase();
+        if (code.startsWith('OM') || code.startsWith('OF')) stats.old_students++;
+        else if (code.startsWith('NM') || code.startsWith('NF')) stats.new_students++;
+        else if (code.startsWith('SM') || code.startsWith('SF')) stats.servers++;
+      }
+    });
+
+    // 2. Language Breakdown (Only for Arrived students)
+    const langResult = await pool.query(
+      "SELECT discourse_language, COUNT(*) as count FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY count DESC",
+      [req.params.id]
+    );
+    stats.languages = langResult.rows;
+
+    res.json(stats);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- EXPENSES ---
