@@ -37,7 +37,7 @@ app.delete('/courses/:id/reset', async (req, res) => {
     await client.query('DELETE FROM expenses WHERE course_id = $1', [req.params.id]);
     await client.query('DELETE FROM participants WHERE course_id = $1', [req.params.id]);
     await client.query('COMMIT');
-    res.json({ message: "Course data reset" });
+    res.json({ message: "Course reset" });
   } catch (err) { await client.query('ROLLBACK'); res.status(500).json({ error: err.message }); } finally { client.release(); }
 });
 
@@ -77,24 +77,21 @@ app.post('/courses/:id/import', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// EDIT
 app.put('/participants/:id', async (req, res) => {
   const { id } = req.params;
   const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no } = req.body;
   try {
-    const _room = room_no || null; const _seat = dining_seat_no || null; const _pagoda = pagoda_cell_no || null; const _conf = conf_no || null; const _dhamma = dhamma_hall_seat_no || null;
+    // Convert "NA" to NULL for updates too
+    const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null);
+    
     const result = await pool.query(
       "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8 WHERE participant_id=$9 RETURNING *",
-      [full_name, phone_number, status, _room, _seat, _pagoda, _conf, _dhamma, id]
+      [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), id]
     );
     res.json(result.rows[0]);
-  } catch (err) {
-    // Error Handling for Edit
-    if (err.code === '23505') {
-       const detail = err.detail || "";
-       if (detail.includes('room_no')) return res.status(409).json({ error: "⚠️ Room already taken" });
-       if (detail.includes('dining_seat_no')) return res.status(409).json({ error: "⚠️ Seat already taken" });
-       return res.status(409).json({ error: "Duplicate data found" });
-    }
+  } catch (err) { 
+    if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found." });
     res.status(500).json({ error: err.message }); 
   }
 });
@@ -106,28 +103,34 @@ app.delete('/participants/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- CHECK-IN (SMARTER ERROR HANDLING) ---
+// --- CHECK-IN (UPDATED WITH "NA" LOGIC) ---
 app.post('/check-in', async (req, res) => {
   const { courseId, participantId, roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat } = req.body;
+  
   try {
-    // Clean empty strings to NULL
-    const _room = roomNo || null;
-    const _seat = seatNo || null;
-    const _laundry = laundryToken || null;
-    const _mobile = mobileLocker || null;
-    const _val = valuablesLocker || null;
-    const _pagoda = pagodaCell || null;
-    const _conf = confNo || null;
-    const _dhamma = dhammaSeat || null;
+    // Helper: If value is "NA" or empty, convert to NULL (database allows multiple NULLs, but not multiple "NA"s)
+    const clean = (val) => {
+      if (!val) return null;
+      if (typeof val === 'string' && ['na', 'n/a', 'no', 'none', '-'].includes(val.trim().toLowerCase())) return null;
+      return val;
+    };
 
     const query = `
       UPDATE participants 
       SET status = 'Arrived', room_no = $1, dining_seat_no = $2, laundry_token_no = $3, 
           mobile_locker_no = $4, valuables_locker_no = $5, discourse_language = $6,
           pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10
-      WHERE participant_id = $11 AND course_id = $12 RETURNING *;
+      WHERE participant_id = $11 AND course_id = $12
+      RETURNING *;
     `;
-    const values = [_room, _seat, _laundry, _mobile, _val, language||'English', _pagoda, laptop, _conf, _dhamma, participantId, courseId];
+    
+    // Apply cleaning to all unique fields
+    const values = [
+      clean(roomNo), clean(seatNo), clean(laundryToken), 
+      clean(mobileLocker), clean(valuablesLocker), language||'English', 
+      clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), 
+      participantId, courseId
+    ];
     
     const result = await pool.query(query, values);
     if (result.rows.length === 0) return res.status(404).json({ error: "Student not found" });
@@ -135,28 +138,21 @@ app.post('/check-in', async (req, res) => {
 
   } catch (err) {
     console.error("CheckIn Error:", err);
-
     if (err.code === '23505') {
       const detail = err.detail || "";
-      // Parse the backend error "Key (course_id, dining_seat_no)=(2, 12) already exists."
-      // We use Regex to find which column failed
-      
-      let msg = "Duplicate assignment found.";
-      if (detail.includes('room_no')) msg = `⚠️ Room '${roomNo}' is already occupied!`;
-      else if (detail.includes('dining_seat_no')) msg = `⚠️ Dining Seat '${seatNo}' is already taken!`;
-      else if (detail.includes('laundry_token_no')) msg = `⚠️ Laundry Token '${laundryToken}' is already assigned!`;
-      else if (detail.includes('pagoda_cell_no')) msg = `⚠️ Pagoda Cell '${pagodaCell}' is already assigned!`;
-      else if (detail.includes('conf_no')) msg = `⚠️ Conf No '${confNo}' already exists!`;
-      else if (detail.includes('mobile_locker_no')) msg = `⚠️ Mobile Locker '${mobileLocker}' is in use!`;
-      else if (detail.includes('valuables_locker_no')) msg = `⚠️ Valuables Locker '${valuablesLocker}' is in use!`;
-      
-      return res.status(409).json({ error: msg });
+      if (detail.includes('room_no')) return res.status(409).json({ error: `⚠️ Room '${roomNo}' occupied!` });
+      if (detail.includes('dining_seat_no')) return res.status(409).json({ error: `⚠️ Seat '${seatNo}' taken!` });
+      if (detail.includes('laundry_token_no')) return res.status(409).json({ error: `⚠️ Token '${laundryToken}' assigned!` });
+      if (detail.includes('pagoda_cell_no')) return res.status(409).json({ error: `⚠️ Pagoda '${pagodaCell}' assigned!` });
+      if (detail.includes('conf_no')) return res.status(409).json({ error: `⚠️ Conf No '${confNo}' exists!` });
+      if (detail.includes('mobile_locker_no')) return res.status(409).json({ error: `⚠️ Mob Locker '${mobileLocker}' taken!` });
+      return res.status(409).json({ error: "Duplicate data detected." });
     }
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- EXPENSES ---
+// --- EXPENSES & REPORTS ---
 app.post('/expenses', async (req, res) => {
   const { courseId, participantId, type, amount } = req.body;
   try {
@@ -169,6 +165,20 @@ app.get('/participants/:id/expenses', async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]);
     res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// New: Get Course Stats for Dashboard
+app.get('/courses/:id/stats', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE status = 'Arrived') as arrived,
+        COUNT(*) FILTER (WHERE status = 'No Response') as no_response,
+        COUNT(*) FILTER (WHERE status = 'Cancelled') as cancelled
+      FROM participants WHERE course_id = $1
+    `, [req.params.id]);
+    res.json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
