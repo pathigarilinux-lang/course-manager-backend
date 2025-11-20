@@ -84,7 +84,33 @@ app.post('/check-in', async (req, res) => {
       WHERE participant_id = $7 AND course_id = $8
       RETURNING *;
     `;
-    
+    // 1.8 Bulk Upload Participants
+app.post('/courses/:id/import', async (req, res) => {
+  const { id } = req.params;
+  const { students } = req.body; // Expecting array: [{name, phone, email}, ...]
+
+  if (!students || !Array.isArray(students)) {
+    return res.status(400).json({ error: "Invalid data format" });
+  }
+
+  try {
+    // Loop through and insert each student
+    // (In a real large app, we would use a 'batch insert', but this is safer for now)
+    for (const s of students) {
+      // Basic cleanup to prevent crashing on empty rows
+      if (s.name && s.name.trim() !== "") {
+        await pool.query(
+          "INSERT INTO participants (course_id, full_name, phone_number, email, status) VALUES ($1, $2, $3, $4, 'No Response')",
+          [id, s.name, s.phone, s.email]
+        );
+      }
+    }
+    res.json({ message: `Successfully imported ${students.length} students` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
     const values = [
       roomNo, seatNo, laundryToken, 
       mobileLocker, valuablesLocker, language, 
