@@ -77,21 +77,19 @@ app.post('/courses/:id/import', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// EDIT
+// EDIT PARTICIPANT (Updated with Special Seating)
 app.put('/participants/:id', async (req, res) => {
   const { id } = req.params;
-  const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no } = req.body;
+  const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating } = req.body;
   try {
-    // Convert "NA" to NULL for updates too
     const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null);
-    
     const result = await pool.query(
-      "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8 WHERE participant_id=$9 RETURNING *",
-      [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), id]
+      "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9 WHERE participant_id=$10 RETURNING *",
+      [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), id]
     );
     res.json(result.rows[0]);
   } catch (err) { 
-    if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found." });
+    if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found" });
     res.status(500).json({ error: err.message }); 
   }
 });
@@ -103,32 +101,24 @@ app.delete('/participants/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- CHECK-IN (UPDATED WITH "NA" LOGIC) ---
+// --- CHECK-IN (Updated with Special Seating) ---
 app.post('/check-in', async (req, res) => {
-  const { courseId, participantId, roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat } = req.body;
-  
+  const { courseId, participantId, roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
   try {
-    // Helper: If value is "NA" or empty, convert to NULL (database allows multiple NULLs, but not multiple "NA"s)
-    const clean = (val) => {
-      if (!val) return null;
-      if (typeof val === 'string' && ['na', 'n/a', 'no', 'none', '-'].includes(val.trim().toLowerCase())) return null;
-      return val;
-    };
+    const clean = (val) => (val && typeof val === 'string' && ['na', 'n/a', 'no', 'none', '-'].includes(val.trim().toLowerCase())) ? null : (val || null);
 
     const query = `
       UPDATE participants 
       SET status = 'Arrived', room_no = $1, dining_seat_no = $2, laundry_token_no = $3, 
           mobile_locker_no = $4, valuables_locker_no = $5, discourse_language = $6,
-          pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10
-      WHERE participant_id = $11 AND course_id = $12
+          pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10,
+          special_seating = $11
+      WHERE participant_id = $12 AND course_id = $13
       RETURNING *;
     `;
-    
-    // Apply cleaning to all unique fields
     const values = [
-      clean(roomNo), clean(seatNo), clean(laundryToken), 
-      clean(mobileLocker), clean(valuablesLocker), language||'English', 
-      clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), 
+      clean(roomNo), clean(seatNo), clean(laundryToken), clean(mobileLocker), clean(valuablesLocker), language||'English', 
+      clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), clean(specialSeating),
       participantId, courseId
     ];
     
@@ -137,22 +127,49 @@ app.post('/check-in', async (req, res) => {
     res.json(result.rows[0]);
 
   } catch (err) {
-    console.error("CheckIn Error:", err);
     if (err.code === '23505') {
       const detail = err.detail || "";
       if (detail.includes('room_no')) return res.status(409).json({ error: `⚠️ Room '${roomNo}' occupied!` });
       if (detail.includes('dining_seat_no')) return res.status(409).json({ error: `⚠️ Seat '${seatNo}' taken!` });
       if (detail.includes('laundry_token_no')) return res.status(409).json({ error: `⚠️ Token '${laundryToken}' assigned!` });
-      if (detail.includes('pagoda_cell_no')) return res.status(409).json({ error: `⚠️ Pagoda '${pagodaCell}' assigned!` });
       if (detail.includes('conf_no')) return res.status(409).json({ error: `⚠️ Conf No '${confNo}' exists!` });
-      if (detail.includes('mobile_locker_no')) return res.status(409).json({ error: `⚠️ Mob Locker '${mobileLocker}' taken!` });
       return res.status(409).json({ error: "Duplicate data detected." });
     }
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- EXPENSES & REPORTS ---
+// --- STATS (UPDATED: Calculates Old/New based on Conf No) ---
+app.get('/courses/:id/stats', async (req, res) => {
+  try {
+    // We fetch all participants to calculate complex logic in JS
+    const result = await pool.query("SELECT status, conf_no FROM participants WHERE course_id = $1", [req.params.id]);
+    
+    const stats = {
+      arrived: 0, no_response: 0, cancelled: 0,
+      old_students: 0, new_students: 0, servers: 0
+    };
+
+    result.rows.forEach(p => {
+      // Basic Status Counts
+      if (p.status === 'Arrived') stats.arrived++;
+      else if (p.status === 'No Response') stats.no_response++;
+      else if (p.status === 'Cancelled') stats.cancelled++;
+
+      // Applicant Type Logic (Only for Arrived/Checked-In students)
+      if (p.status === 'Arrived' && p.conf_no) {
+        const code = p.conf_no.toUpperCase();
+        if (code.startsWith('OM') || code.startsWith('OF')) stats.old_students++;
+        else if (code.startsWith('NM') || code.startsWith('NF')) stats.new_students++;
+        else if (code.startsWith('SM') || code.startsWith('SF')) stats.servers++;
+      }
+    });
+
+    res.json(stats);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- EXPENSES ---
 app.post('/expenses', async (req, res) => {
   const { courseId, participantId, type, amount } = req.body;
   try {
@@ -165,20 +182,6 @@ app.get('/participants/:id/expenses', async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]);
     res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// New: Get Course Stats for Dashboard
-app.get('/courses/:id/stats', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        COUNT(*) FILTER (WHERE status = 'Arrived') as arrived,
-        COUNT(*) FILTER (WHERE status = 'No Response') as no_response,
-        COUNT(*) FILTER (WHERE status = 'Cancelled') as cancelled
-      FROM participants WHERE course_id = $1
-    `, [req.params.id]);
-    res.json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
