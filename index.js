@@ -58,18 +58,31 @@ app.get('/courses/:id/participants', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// BULK IMPORT (UPDATED FOR NEW CSV COLUMNS)
 app.post('/courses/:id/import', async (req, res) => {
   const { id } = req.params;
   const { students } = req.body;
   if (!students || !Array.isArray(students)) return res.status(400).json({ error: "Invalid data" });
+  
   let added = 0, skipped = 0;
   try {
     for (const s of students) {
       const name = s.name ? s.name.trim() : "";
       if (name.length < 1) continue;
-      const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)", [id, name]);
-      if (check.rows.length > 0) { skipped++; } else {
-        await pool.query("INSERT INTO participants (course_id, full_name, phone_number, email, status) VALUES ($1, $2, $3, $4, 'No Response')", [id, name, s.phone||'', s.email||'']);
+
+      // Check for duplicate Name OR Conf No
+      const check = await pool.query(
+        "SELECT participant_id FROM participants WHERE course_id = $1 AND (LOWER(full_name) = LOWER($2) OR (conf_no IS NOT NULL AND conf_no = $3))", 
+        [id, name, s.confNo]
+      );
+
+      if (check.rows.length > 0) { 
+        skipped++; 
+      } else {
+        await pool.query(
+          "INSERT INTO participants (course_id, full_name, phone_number, email, status, age, gender, courses_info, conf_no) VALUES ($1, $2, $3, $4, 'No Response', $5, $6, $7, $8)", 
+          [id, name, s.phone||'', s.email||'', s.age||null, s.gender||null, s.courses||null, s.confNo||null]
+        );
         added++;
       }
     }
@@ -77,7 +90,7 @@ app.post('/courses/:id/import', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// EDIT PARTICIPANT (Updated with Special Seating)
+// EDIT
 app.put('/participants/:id', async (req, res) => {
   const { id } = req.params;
   const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating } = req.body;
@@ -89,7 +102,7 @@ app.put('/participants/:id', async (req, res) => {
     );
     res.json(result.rows[0]);
   } catch (err) { 
-    if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found" });
+    if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found." });
     res.status(500).json({ error: err.message }); 
   }
 });
@@ -101,62 +114,38 @@ app.delete('/participants/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- CHECK-IN (Updated with Special Seating) ---
+// --- CHECK-IN ---
 app.post('/check-in', async (req, res) => {
   const { courseId, participantId, roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
   try {
     const clean = (val) => (val && typeof val === 'string' && ['na', 'n/a', 'no', 'none', '-'].includes(val.trim().toLowerCase())) ? null : (val || null);
-
     const query = `
       UPDATE participants 
       SET status = 'Arrived', room_no = $1, dining_seat_no = $2, laundry_token_no = $3, 
           mobile_locker_no = $4, valuables_locker_no = $5, discourse_language = $6,
           pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10,
           special_seating = $11
-      WHERE participant_id = $12 AND course_id = $13
-      RETURNING *;
+      WHERE participant_id = $12 AND course_id = $13 RETURNING *;
     `;
-    const values = [
-      clean(roomNo), clean(seatNo), clean(laundryToken), clean(mobileLocker), clean(valuablesLocker), language||'English', 
-      clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), clean(specialSeating),
-      participantId, courseId
-    ];
-    
+    const values = [ clean(roomNo), clean(seatNo), clean(laundryToken), clean(mobileLocker), clean(valuablesLocker), language||'English', clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), clean(specialSeating), participantId, courseId ];
     const result = await pool.query(query, values);
     if (result.rows.length === 0) return res.status(404).json({ error: "Student not found" });
     res.json(result.rows[0]);
-
   } catch (err) {
-    if (err.code === '23505') {
-      const detail = err.detail || "";
-      if (detail.includes('room_no')) return res.status(409).json({ error: `⚠️ Room '${roomNo}' occupied!` });
-      if (detail.includes('dining_seat_no')) return res.status(409).json({ error: `⚠️ Seat '${seatNo}' taken!` });
-      if (detail.includes('laundry_token_no')) return res.status(409).json({ error: `⚠️ Token '${laundryToken}' assigned!` });
-      if (detail.includes('conf_no')) return res.status(409).json({ error: `⚠️ Conf No '${confNo}' exists!` });
-      return res.status(409).json({ error: "Duplicate data detected." });
-    }
+    if (err.code === '23505') return res.status(409).json({ error: "Duplicate data detected! Check your numbers." });
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- STATS (UPDATED: Calculates Old/New based on Conf No) ---
+// --- STATS ---
 app.get('/courses/:id/stats', async (req, res) => {
   try {
-    // We fetch all participants to calculate complex logic in JS
     const result = await pool.query("SELECT status, conf_no FROM participants WHERE course_id = $1", [req.params.id]);
-    
-    const stats = {
-      arrived: 0, no_response: 0, cancelled: 0,
-      old_students: 0, new_students: 0, servers: 0
-    };
-
+    const stats = { arrived: 0, no_response: 0, cancelled: 0, old_students: 0, new_students: 0, servers: 0 };
     result.rows.forEach(p => {
-      // Basic Status Counts
       if (p.status === 'Arrived') stats.arrived++;
       else if (p.status === 'No Response') stats.no_response++;
       else if (p.status === 'Cancelled') stats.cancelled++;
-
-      // Applicant Type Logic (Only for Arrived/Checked-In students)
       if (p.status === 'Arrived' && p.conf_no) {
         const code = p.conf_no.toUpperCase();
         if (code.startsWith('OM') || code.startsWith('OF')) stats.old_students++;
@@ -164,34 +153,13 @@ app.get('/courses/:id/stats', async (req, res) => {
         else if (code.startsWith('SM') || code.startsWith('SF')) stats.servers++;
       }
     });
-
     res.json(stats);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- EXPENSES ---
-app.post('/expenses', async (req, res) => {
-  const { courseId, participantId, type, amount } = req.body;
-  try {
-    const result = await pool.query("INSERT INTO expenses (course_id, participant_id, expense_type, amount) VALUES ($1, $2, $3, $4) RETURNING *", [courseId, participantId, type, amount]);
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/participants/:id/expenses', async (req, res) => {
-  try {
-    const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]);
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/courses/:id/financial-report', async (req, res) => {
-  try {
-    const query = `SELECT p.full_name, p.room_no, p.dining_seat_no, COALESCE(SUM(e.amount), 0) as total_due FROM participants p LEFT JOIN expenses e ON p.participant_id = e.participant_id WHERE p.course_id = $1 GROUP BY p.participant_id, p.full_name, p.room_no, p.dining_seat_no HAVING SUM(e.amount) > 0 ORDER BY p.full_name ASC`;
-    const result = await pool.query(query, [req.params.id]);
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.post('/expenses', async (req, res) => { /* ... keep expenses logic ... */ const { courseId, participantId, type, amount } = req.body; try { const result = await pool.query("INSERT INTO expenses (course_id, participant_id, expense_type, amount) VALUES ($1, $2, $3, $4) RETURNING *", [courseId, participantId, type, amount]); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
+app.get('/participants/:id/expenses', async (req, res) => { /* ... */ try { const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
+app.get('/courses/:id/financial-report', async (req, res) => { /* ... */ try { const query = `SELECT p.full_name, p.room_no, p.dining_seat_no, COALESCE(SUM(e.amount), 0) as total_due FROM participants p LEFT JOIN expenses e ON p.participant_id = e.participant_id WHERE p.course_id = $1 GROUP BY p.participant_id, p.full_name, p.room_no, p.dining_seat_no HAVING SUM(e.amount) > 0 ORDER BY p.full_name ASC`; const result = await pool.query(query, [req.params.id]); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
