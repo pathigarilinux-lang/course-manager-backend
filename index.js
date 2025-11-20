@@ -14,10 +14,20 @@ const pool = new Pool({
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 
-// --- COURSES ---
+// --- COURSES (UPDATED: Returns Stats for Dashboard) ---
 app.get('/courses', async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM courses ORDER BY start_date DESC");
+    const query = `
+      SELECT c.*, 
+        COUNT(CASE WHEN p.status = 'Arrived' THEN 1 END)::int as arrived,
+        COUNT(CASE WHEN p.status = 'No Response' THEN 1 END)::int as pending,
+        COUNT(CASE WHEN p.status = 'Cancelled' THEN 1 END)::int as cancelled
+      FROM courses c
+      LEFT JOIN participants p ON c.course_id = p.course_id
+      GROUP BY c.course_id
+      ORDER BY c.start_date DESC
+    `;
+    const result = await pool.query(query);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -69,7 +79,6 @@ app.post('/courses/:id/import', async (req, res) => {
       if (name.length < 1) continue;
       const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND (LOWER(full_name) = LOWER($2) OR (conf_no IS NOT NULL AND conf_no = $3))", [id, name, s.confNo]);
       if (check.rows.length > 0) { skipped++; } else {
-        // Ensure all fields (including conf_no) are passed correctly
         await pool.query(
           "INSERT INTO participants (course_id, full_name, phone_number, email, status, age, gender, courses_info, conf_no) VALUES ($1, $2, $3, $4, 'No Response', $5, $6, $7, $8)", 
           [id, name, s.phone||'', s.email||'', s.age||null, s.gender||null, s.courses||null, s.confNo||null]
@@ -83,12 +92,12 @@ app.post('/courses/:id/import', async (req, res) => {
 
 app.put('/participants/:id', async (req, res) => {
   const { id } = req.params;
-  const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating } = req.body;
+  const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language } = req.body;
   try {
     const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null);
     const result = await pool.query(
-      "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9 WHERE participant_id=$10 RETURNING *",
-      [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), id]
+      "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9, discourse_language=$10 WHERE participant_id=$11 RETURNING *",
+      [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), discourse_language, id]
     );
     res.json(result.rows[0]);
   } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found." }); res.status(500).json({ error: err.message }); }
@@ -131,31 +140,6 @@ app.post('/check-in', async (req, res) => {
   }
 });
 
-// --- STATS (FIXED: Trim spaces from Conf No) ---
-app.get('/courses/:id/stats', async (req, res) => {
-  try {
-    const result = await pool.query("SELECT status, conf_no FROM participants WHERE course_id = $1", [req.params.id]);
-    const stats = { arrived: 0, no_response: 0, cancelled: 0, old_students: 0, new_students: 0, servers: 0 };
-    
-    result.rows.forEach(p => {
-      if (p.status === 'Arrived') stats.arrived++;
-      else if (p.status === 'No Response') stats.no_response++;
-      else if (p.status === 'Cancelled') stats.cancelled++;
-      
-      // Count ALL students (not just arrived) for applicant types if needed, 
-      // but typically we only count those who are confirmed/arrived.
-      // Removing 'Arrived' check if you want to see stats for EVERYONE uploaded.
-      if (p.conf_no) {
-        const code = p.conf_no.trim().toUpperCase(); // FIX: Trim spaces
-        if (code.startsWith('OM') || code.startsWith('OF')) stats.old_students++;
-        else if (code.startsWith('NM') || code.startsWith('NF')) stats.new_students++;
-        else if (code.startsWith('SM') || code.startsWith('SF')) stats.servers++;
-      }
-    });
-    res.json(stats);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
 // --- EXPENSES ---
 app.post('/expenses', async (req, res) => {
   const { courseId, participantId, type, amount } = req.body;
@@ -165,7 +149,6 @@ app.post('/expenses', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// NEW: EDIT EXPENSE
 app.put('/expenses/:id', async (req, res) => {
   const { expense_type, amount } = req.body;
   try {
