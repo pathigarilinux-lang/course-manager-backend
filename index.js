@@ -14,45 +14,22 @@ const pool = new Pool({
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 
-// --- GLOBAL ROOM OCCUPANCY (FIXED: Shows ALL assigned rooms, not just Arrived) ---
-app.get('/rooms/occupancy', async (req, res) => {
-  try {
-    const query = `
-      SELECT p.room_no, p.full_name, p.conf_no, p.status, p.gender, c.course_name
-      FROM participants p
-      JOIN courses c ON p.course_id = c.course_id
-      WHERE p.room_no IS NOT NULL AND p.room_no != ''
-    `;
-    const result = await pool.query(query);
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// --- ROOM MANAGEMENT ---
-app.get('/rooms', async (req, res) => {
-  try {
-    const result = await pool.query("SELECT * FROM rooms ORDER BY room_no ASC");
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/rooms', async (req, res) => {
-  const { roomNo, type } = req.body;
-  try {
-    const result = await pool.query("INSERT INTO rooms (room_no, gender_type) VALUES ($1, $2) RETURNING *", [roomNo, type]);
-    res.json(result.rows[0]);
-  } catch (err) { 
-    if (err.code === '23505') return res.status(409).json({ error: "Room already exists" });
-    res.status(500).json({ error: err.message }); 
+// --- HELPER: GLOBAL CONFLICT CHECKER ---
+const checkGlobalConflict = async (field, value, currentId) => {
+  if (!value) return null;
+  const query = `
+    SELECT p.full_name, c.course_name 
+    FROM participants p
+    JOIN courses c ON p.course_id = c.course_id
+    WHERE p.${field} = $1 AND p.status = 'Arrived' AND p.participant_id != $2
+  `;
+  const result = await pool.query(query, [value, currentId || -1]);
+  if (result.rows.length > 0) {
+    const occupant = result.rows[0];
+    return `${occupant.full_name} (${occupant.course_name})`;
   }
-});
-
-app.delete('/rooms/:id', async (req, res) => {
-  try {
-    await pool.query("DELETE FROM rooms WHERE room_id = $1", [req.params.id]);
-    res.json({ message: "Room deleted" });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+  return null;
+};
 
 // --- COURSES ---
 app.get('/courses', async (req, res) => {
@@ -149,12 +126,17 @@ app.put('/participants/:id', async (req, res) => {
   const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating } = req.body;
   try {
     const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null);
+    
+    // GLOBAL CONFLICT CHECKS (Prevent Edit Overwrites)
+    const roomOwner = await checkGlobalConflict('room_no', clean(room_no), id);
+    if (roomOwner) return res.status(409).json({ error: `⚠️ Room ${room_no} is occupied by ${roomOwner}` });
+
     const result = await pool.query(
       "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9 WHERE participant_id=$10 RETURNING *",
       [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), id]
     );
     res.json(result.rows[0]);
-  } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found." }); res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/participants/:id', async (req, res) => {
@@ -164,11 +146,20 @@ app.delete('/participants/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- CHECK-IN ---
+// --- CHECK-IN (NOW WITH GLOBAL PROTECTION) ---
 app.post('/check-in', async (req, res) => {
   const { courseId, participantId, roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
   try {
     const clean = (val) => (val && typeof val === 'string' && ['na', 'n/a', 'no', 'none', '-'].includes(val.trim().toLowerCase())) ? null : (val || null);
+
+    // 1. GLOBAL CONFLICT CHECKS
+    // Before updating, check if these resources are used by ANY Arrived student in ANY course
+    const roomOwner = await checkGlobalConflict('room_no', clean(roomNo), participantId);
+    if (roomOwner) return res.status(409).json({ error: `🛑 Room ${roomNo} is occupied by ${roomOwner}!` });
+
+    const bedOwner = await checkGlobalConflict('pagoda_cell_no', clean(pagodaCell), participantId);
+    if (bedOwner) return res.status(409).json({ error: `🛑 Pagoda ${pagodaCell} is assigned to ${bedOwner}!` });
+
     const query = `
       UPDATE participants 
       SET status = 'Arrived', room_no = $1, dining_seat_no = $2, laundry_token_no = $3, 
@@ -182,11 +173,10 @@ app.post('/check-in', async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: "Student not found" });
     res.json(result.rows[0]);
   } catch (err) {
+    // Fallback for Course-Level duplicates (like Dining Seat which CAN be same across courses but unique within course)
     if (err.code === '23505') {
       const detail = err.detail || "";
-      if (detail.includes('room_no')) return res.status(409).json({ error: `⚠️ Room '${roomNo}' occupied!` });
-      if (detail.includes('dining_seat_no')) return res.status(409).json({ error: `⚠️ Seat '${seatNo}' taken!` });
-      if (detail.includes('laundry_token_no')) return res.status(409).json({ error: `⚠️ Token '${laundryToken}' assigned!` });
+      if (detail.includes('dining_seat_no')) return res.status(409).json({ error: `⚠️ Seat '${seatNo}' taken in this course!` });
       if (detail.includes('conf_no')) return res.status(409).json({ error: `⚠️ Conf No '${confNo}' exists!` });
       return res.status(409).json({ error: "Duplicate data detected." });
     }
@@ -213,17 +203,48 @@ app.get('/courses/:id/stats', async (req, res) => {
         else if (code.startsWith('SM')) stats.sm++; else if (code.startsWith('SF')) stats.sf++;
       }
     });
-
-    const langResult = await pool.query(
-      `SELECT discourse_language, COUNT(*) as total,
-        COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count,
-        COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count
-      FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY total DESC`,
-      [req.params.id]
-    );
+    const langResult = await pool.query("SELECT discourse_language, COUNT(*) as total, COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count, COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY total DESC", [req.params.id]);
     stats.languages = langResult.rows;
-
     res.json(stats);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ROOM MANAGEMENT ---
+app.get('/rooms/occupancy', async (req, res) => {
+  try {
+    const query = `
+      SELECT p.room_no, p.full_name, p.conf_no, p.status, p.gender, c.course_name
+      FROM participants p
+      JOIN courses c ON p.course_id = c.course_id
+      WHERE p.room_no IS NOT NULL AND p.room_no != ''
+    `;
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/rooms', async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM rooms ORDER BY room_no ASC");
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/rooms', async (req, res) => {
+  const { roomNo, type } = req.body;
+  try {
+    const result = await pool.query("INSERT INTO rooms (room_no, gender_type) VALUES ($1, $2) RETURNING *", [roomNo, type]);
+    res.json(result.rows[0]);
+  } catch (err) { 
+    if (err.code === '23505') return res.status(409).json({ error: "Room already exists" });
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.delete('/rooms/:id', async (req, res) => {
+  try {
+    await pool.query("DELETE FROM rooms WHERE room_id = $1", [req.params.id]);
+    res.json({ message: "Room deleted" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
