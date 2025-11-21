@@ -7,29 +7,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// SECURITY: Simple API Key for your website integration
+const INTEGRATION_KEY = process.env.INTEGRATION_KEY || "vridhamma_secret_key_123"; 
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
-
-// --- HELPER: GLOBAL CONFLICT CHECKER ---
-const checkGlobalConflict = async (field, value, currentId) => {
-  if (!value) return null;
-  const query = `
-    SELECT p.full_name, c.course_name 
-    FROM participants p
-    JOIN courses c ON p.course_id = c.course_id
-    WHERE p.${field} = $1 AND p.status = 'Arrived' AND p.participant_id != $2
-  `;
-  const result = await pool.query(query, [value, currentId || -1]);
-  if (result.rows.length > 0) {
-    const occupant = result.rows[0];
-    return `${occupant.full_name} (${occupant.course_name})`;
-  }
-  return null;
-};
 
 // --- COURSES ---
 app.get('/courses', async (req, res) => {
@@ -126,17 +112,12 @@ app.put('/participants/:id', async (req, res) => {
   const { full_name, phone_number, status, room_no, dining_seat_no, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating } = req.body;
   try {
     const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null);
-    
-    // GLOBAL CONFLICT CHECKS (Prevent Edit Overwrites)
-    const roomOwner = await checkGlobalConflict('room_no', clean(room_no), id);
-    if (roomOwner) return res.status(409).json({ error: `⚠️ Room ${room_no} is occupied by ${roomOwner}` });
-
     const result = await pool.query(
       "UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9 WHERE participant_id=$10 RETURNING *",
       [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), id]
     );
     res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Duplicate data found." }); res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/participants/:id', async (req, res) => {
@@ -146,19 +127,22 @@ app.delete('/participants/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- CHECK-IN (NOW WITH GLOBAL PROTECTION) ---
+// --- CHECK-IN (UPDATED WITH SPECIFIC ERROR MESSAGES) ---
 app.post('/check-in', async (req, res) => {
   const { courseId, participantId, roomNo, seatNo, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
   try {
     const clean = (val) => (val && typeof val === 'string' && ['na', 'n/a', 'no', 'none', '-'].includes(val.trim().toLowerCase())) ? null : (val || null);
 
-    // 1. GLOBAL CONFLICT CHECKS
-    // Before updating, check if these resources are used by ANY Arrived student in ANY course
-    const roomOwner = await checkGlobalConflict('room_no', clean(roomNo), participantId);
-    if (roomOwner) return res.status(409).json({ error: `🛑 Room ${roomNo} is occupied by ${roomOwner}!` });
-
-    const bedOwner = await checkGlobalConflict('pagoda_cell_no', clean(pagodaCell), participantId);
-    if (bedOwner) return res.status(409).json({ error: `🛑 Pagoda ${pagodaCell} is assigned to ${bedOwner}!` });
+    // 1. GLOBAL CONFLICT CHECK (Room)
+    if (roomNo) {
+        const roomCheck = await pool.query(
+            "SELECT p.full_name, c.course_name FROM participants p JOIN courses c ON p.course_id = c.course_id WHERE p.room_no = $1 AND p.status = 'Arrived' AND p.participant_id != $2",
+            [roomNo, participantId]
+        );
+        if (roomCheck.rows.length > 0) {
+            return res.status(409).json({ error: `🛑 Room ${roomNo} is occupied by ${roomCheck.rows[0].full_name} (${roomCheck.rows[0].course_name})` });
+        }
+    }
 
     const query = `
       UPDATE participants 
@@ -169,16 +153,25 @@ app.post('/check-in', async (req, res) => {
       WHERE participant_id = $12 AND course_id = $13 RETURNING *;
     `;
     const values = [ clean(roomNo), clean(seatNo), clean(laundryToken), clean(mobileLocker), clean(valuablesLocker), language||'English', clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), clean(specialSeating), participantId, courseId ];
+    
     const result = await pool.query(query, values);
     if (result.rows.length === 0) return res.status(404).json({ error: "Student not found" });
     res.json(result.rows[0]);
+
   } catch (err) {
-    // Fallback for Course-Level duplicates (like Dining Seat which CAN be same across courses but unique within course)
+    console.error("CheckIn Error:", err);
     if (err.code === '23505') {
       const detail = err.detail || "";
-      if (detail.includes('dining_seat_no')) return res.status(409).json({ error: `⚠️ Seat '${seatNo}' taken in this course!` });
-      if (detail.includes('conf_no')) return res.status(409).json({ error: `⚠️ Conf No '${confNo}' exists!` });
-      return res.status(409).json({ error: "Duplicate data detected." });
+      // Check exactly which field caused the duplicate error
+      if (detail.includes('room_no')) return res.status(409).json({ error: `⚠️ Room '${roomNo}' is already occupied in this course!` });
+      if (detail.includes('dining_seat_no')) return res.status(409).json({ error: `⚠️ Dining Seat '${seatNo}' is already taken!` });
+      if (detail.includes('laundry_token_no')) return res.status(409).json({ error: `⚠️ Laundry Token '${laundryToken}' is already assigned!` });
+      if (detail.includes('pagoda_cell_no')) return res.status(409).json({ error: `⚠️ Pagoda Cell '${pagodaCell}' is already assigned!` });
+      if (detail.includes('conf_no')) return res.status(409).json({ error: `⚠️ Conf No '${confNo}' already exists!` });
+      if (detail.includes('mobile_locker_no')) return res.status(409).json({ error: `⚠️ Mobile Locker '${mobileLocker}' is already in use!` });
+      if (detail.includes('valuables_locker_no')) return res.status(409).json({ error: `⚠️ Valuables Locker '${valuablesLocker}' is already in use!` });
+      
+      return res.status(409).json({ error: "Duplicate Data Detected. Please check your entries." });
     }
     res.status(500).json({ error: err.message });
   }
