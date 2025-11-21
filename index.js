@@ -14,6 +14,32 @@ const pool = new Pool({
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 
+// --- ROOM MANAGEMENT (NEW) ---
+app.get('/rooms', async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM rooms ORDER BY room_no ASC");
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/rooms', async (req, res) => {
+  const { roomNo, type } = req.body;
+  try {
+    const result = await pool.query("INSERT INTO rooms (room_no, gender_type) VALUES ($1, $2) RETURNING *", [roomNo, type]);
+    res.json(result.rows[0]);
+  } catch (err) { 
+    if (err.code === '23505') return res.status(409).json({ error: "Room already exists" });
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.delete('/rooms/:id', async (req, res) => {
+  try {
+    await pool.query("DELETE FROM rooms WHERE room_id = $1", [req.params.id]);
+    res.json({ message: "Room deleted" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- COURSES ---
 app.get('/courses', async (req, res) => {
   try {
@@ -154,53 +180,27 @@ app.post('/check-in', async (req, res) => {
   }
 });
 
-// --- STATS (UPDATED: Status Split by Gender) ---
+// --- STATS ---
 app.get('/courses/:id/stats', async (req, res) => {
   try {
     const result = await pool.query("SELECT status, conf_no, gender FROM participants WHERE course_id = $1", [req.params.id]);
-    const stats = { 
-      arrived: 0, no_response: 0, cancelled: 0, 
-      om: 0, of: 0, nm: 0, nf: 0, sm: 0, sf: 0,
-      arrived_m: 0, arrived_f: 0, pending_m: 0, pending_f: 0, cancelled_m: 0, cancelled_f: 0,
-      languages: [] 
-    };
+    const stats = { arrived: 0, no_response: 0, cancelled: 0, om: 0, of: 0, nm: 0, nf: 0, sm: 0, sf: 0, arrived_m: 0, arrived_f: 0, pending_m: 0, pending_f: 0, cancelled_m: 0, cancelled_f: 0, languages: [] };
     
     result.rows.forEach(p => {
       const isMale = p.gender && p.gender.toLowerCase() === 'male';
-      
-      if (p.status === 'Arrived') {
-        stats.arrived++;
-        if(isMale) stats.arrived_m++; else stats.arrived_f++;
-      }
-      else if (p.status === 'No Response') {
-        stats.no_response++;
-        if(isMale) stats.pending_m++; else stats.pending_f++;
-      }
-      else if (p.status === 'Cancelled') {
-        stats.cancelled++;
-        if(isMale) stats.cancelled_m++; else stats.cancelled_f++;
-      }
+      if (p.status === 'Arrived') { stats.arrived++; if(isMale) stats.arrived_m++; else stats.arrived_f++; }
+      else if (p.status === 'No Response') { stats.no_response++; if(isMale) stats.pending_m++; else stats.pending_f++; }
+      else if (p.status === 'Cancelled') { stats.cancelled++; if(isMale) stats.cancelled_m++; else stats.cancelled_f++; }
       
       if (p.status === 'Arrived' && p.conf_no) {
         const code = p.conf_no.trim().toUpperCase();
-        if (code.startsWith('OM')) stats.om++;
-        else if (code.startsWith('OF')) stats.of++;
-        else if (code.startsWith('NM')) stats.nm++;
-        else if (code.startsWith('NF')) stats.nf++;
-        else if (code.startsWith('SM')) stats.sm++;
-        else if (code.startsWith('SF')) stats.sf++;
+        if (code.startsWith('OM')) stats.om++; else if (code.startsWith('OF')) stats.of++;
+        else if (code.startsWith('NM')) stats.nm++; else if (code.startsWith('NF')) stats.nf++;
+        else if (code.startsWith('SM')) stats.sm++; else if (code.startsWith('SF')) stats.sf++;
       }
     });
-
-    const langResult = await pool.query(
-      `SELECT discourse_language, COUNT(*) as total,
-        COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count,
-        COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count
-      FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY total DESC`,
-      [req.params.id]
-    );
+    const langResult = await pool.query("SELECT discourse_language, COUNT(*) as total, COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count, COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY total DESC", [req.params.id]);
     stats.languages = langResult.rows;
-
     res.json(stats);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -241,6 +241,17 @@ app.get('/courses/:id/financial-report', async (req, res) => {
     const query = `SELECT p.full_name, p.room_no, p.dining_seat_no, COALESCE(SUM(e.amount), 0) as total_due FROM participants p LEFT JOIN expenses e ON p.participant_id = e.participant_id WHERE p.course_id = $1 GROUP BY p.participant_id, p.full_name, p.room_no, p.dining_seat_no HAVING SUM(e.amount) > 0 ORDER BY p.full_name ASC`;
     const result = await pool.query(query, [req.params.id]);
     res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/integration/add-student', async (req, res) => {
+  const { apiKey, courseId, student } = req.body;
+  if (apiKey !== (process.env.INTEGRATION_KEY || "vridhamma_secret_key_123")) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)", [courseId, student.fullName]);
+    if (check.rows.length > 0) return res.json({ message: "Student already exists" });
+    await pool.query("INSERT INTO participants (course_id, full_name, phone_number, email, age, gender, conf_no, status) VALUES ($1, $2, $3, $4, $5, $6, $7, 'No Response')", [courseId, student.fullName, student.phone, student.email, student.age, student.gender, student.confNo]);
+    res.json({ message: "Student added" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
