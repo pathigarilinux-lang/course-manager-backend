@@ -14,7 +14,23 @@ const pool = new Pool({
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 
-// --- ROOM MANAGEMENT (NEW) ---
+// --- GLOBAL ROOM OCCUPANCY (NEW) ---
+app.get('/rooms/occupancy', async (req, res) => {
+  try {
+    // Get ALL students who are currently checked in ('Arrived') across ALL courses
+    // Join with the Courses table to get the Course Name
+    const query = `
+      SELECT p.room_no, p.full_name, p.conf_no, p.gender, c.course_name, c.course_id
+      FROM participants p
+      JOIN courses c ON p.course_id = c.course_id
+      WHERE p.status = 'Arrived' AND p.room_no IS NOT NULL
+    `;
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ROOM MANAGEMENT ---
 app.get('/rooms', async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM rooms ORDER BY room_no ASC");
@@ -199,8 +215,16 @@ app.get('/courses/:id/stats', async (req, res) => {
         else if (code.startsWith('SM')) stats.sm++; else if (code.startsWith('SF')) stats.sf++;
       }
     });
-    const langResult = await pool.query("SELECT discourse_language, COUNT(*) as total, COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count, COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY total DESC", [req.params.id]);
+
+    const langResult = await pool.query(
+      `SELECT discourse_language, COUNT(*) as total,
+        COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count,
+        COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count
+      FROM participants WHERE course_id = $1 AND status = 'Arrived' GROUP BY discourse_language ORDER BY total DESC`,
+      [req.params.id]
+    );
     stats.languages = langResult.rows;
+
     res.json(stats);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
