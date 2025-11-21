@@ -14,16 +14,14 @@ const pool = new Pool({
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 
-// --- GLOBAL ROOM OCCUPANCY (NEW) ---
+// --- GLOBAL ROOM OCCUPANCY (FIXED: Shows ALL assigned rooms, not just Arrived) ---
 app.get('/rooms/occupancy', async (req, res) => {
   try {
-    // Get ALL students who are currently checked in ('Arrived') across ALL courses
-    // Join with the Courses table to get the Course Name
     const query = `
-      SELECT p.room_no, p.full_name, p.conf_no, p.gender, c.course_name, c.course_id
+      SELECT p.room_no, p.full_name, p.conf_no, p.status, p.gender, c.course_name
       FROM participants p
       JOIN courses c ON p.course_id = c.course_id
-      WHERE p.status = 'Arrived' AND p.room_no IS NOT NULL
+      WHERE p.room_no IS NOT NULL AND p.room_no != ''
     `;
     const result = await pool.query(query);
     res.json(result.rows);
