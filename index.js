@@ -85,3 +85,20 @@ app.post('/api/integration/add-student', async (req, res) => { const { apiKey, c
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// In handleAutoAssign...
+// Instead of the for loop:
+try {
+    const payload = updates.map(u => ({ id: u.participant_id, seat: u.dhamma_hall_seat_no }));
+    
+    await fetch(`${API_URL}/participants/bulk-seat-update`, { 
+        method: 'PUT', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ updates: payload }) 
+    });
+
+    alert("✅ Seats Assigned Instantly!"); 
+    loadStudents();
+} catch (err) {
+    console.error(err);
+}
