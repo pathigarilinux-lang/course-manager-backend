@@ -63,6 +63,37 @@ app.get('/courses/:id/financial-report', async (req, res) => { try { const query
 app.delete('/courses/:id/reset', async (req, res) => { const client = await pool.connect(); try { await client.query('BEGIN'); await client.query('DELETE FROM expenses WHERE course_id = $1', [req.params.id]); await client.query('DELETE FROM participants WHERE course_id = $1', [req.params.id]); await client.query('COMMIT'); res.json({ message: "Course reset" }); } catch (err) { await client.query('ROLLBACK'); res.status(500).json({ error: err.message }); } finally { client.release(); } });
 app.delete('/courses/:id', async (req, res) => { try { await pool.query('DELETE FROM expenses WHERE course_id = $1', [req.params.id]); await pool.query('DELETE FROM participants WHERE course_id = $1', [req.params.id]); await pool.query('DELETE FROM courses WHERE course_id = $1', [req.params.id]); res.json({ message: "Course deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/api/integration/add-student', async (req, res) => { const { apiKey, courseId, student } = req.body; if (apiKey !== (process.env.INTEGRATION_KEY || "vridhamma_secret_key_123")) return res.status(401).json({ error: "Unauthorized" }); try { const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)", [courseId, student.fullName]); if (check.rows.length > 0) return res.json({ message: "Student already exists" }); await pool.query("INSERT INTO participants (course_id, full_name, phone_number, email, age, gender, conf_no, status) VALUES ($1, $2, $3, $4, $5, $6, $7, 'No Response')", [courseId, student.fullName, student.phone, student.email, student.age, student.gender, student.confNo]); res.json({ message: "Student added" }); } catch (err) { res.status(500).json({ error: err.message }); } });
+// --- BULK OPERATIONS (Performance Fix) ---
+app.put('/participants/bulk-update', async (req, res) => {
+  const { updates } = req.body; // Expects array of { id, ...fields }
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN'); // Start Transaction
+    
+    for (const u of updates) {
+      // Dynamic update query construction
+      const fields = Object.keys(u).filter(k => k !== 'participant_id');
+      const values = fields.map((k, i) => `$${i + 2}`); // $2, $3... ($1 is id)
+      const setClause = fields.map((k, i) => `${k} = $${i + 2}`).join(', ');
+      
+      if (fields.length > 0) {
+        await client.query(
+          `UPDATE participants SET ${setClause} WHERE participant_id = $1`,
+          [u.participant_id, ...fields.map(k => u[k])]
+        );
+      }
+    }
 
+    await client.query('COMMIT'); // Commit all changes at once
+    res.json({ message: `✅ Updated ${updates.length} records successfully.` });
+  } catch (err) {
+    await client.query('ROLLBACK'); // If one fails, undo all
+    console.error("Bulk Update Failed:", err);
+    res.status(500).json({ error: "Bulk update failed." });
+  } finally {
+    client.release();
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
