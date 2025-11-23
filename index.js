@@ -17,50 +17,31 @@ const PROTECTED_ROOMS = new Set(["301AI","301BI","302AI","302BI","303AI","303BI"
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 
-// --- ALERTS & LOGS (NEW) ---
+// --- ALERTS & LOGS ---
 app.get('/alerts', async (req, res) => {
   try {
-    // Fetch High Priority Issues (Medical, Food, Notes)
-    const result = await pool.query(`
-      SELECT full_name, conf_no, medical_info, evening_food, teacher_notes 
-      FROM participants 
-      WHERE (medical_info IS NOT NULL AND medical_info != '') 
-         OR (teacher_notes IS NOT NULL AND teacher_notes != '')
-         OR (evening_food IS NOT NULL AND evening_food != 'None')
-    `);
+    const result = await pool.query(`SELECT full_name, conf_no, medical_info, evening_food, teacher_notes FROM participants WHERE (medical_info IS NOT NULL AND medical_info != '') OR (teacher_notes IS NOT NULL AND teacher_notes != '') OR (evening_food IS NOT NULL AND evening_food != 'None')`);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- NOTIFICATIONS (SIMULATION) ---
 app.post('/notify', async (req, res) => {
-  const { type, participantId, courseId } = req.body;
-  // In a real app, you would integrate Twilio/SendGrid here.
-  // For now, we log it and return success to simulate the action.
+  const { type, participantId } = req.body;
   console.log(`[NOTIFICATION] Sending ${type} to participant ${participantId}`);
-  
-  if (type === 'reminder_all') {
-     // Logic to find all 'No Response' students and queue SMS
-     return res.json({ message: `✅ Reminders queued for all pending students!` });
-  }
-  
   return res.json({ message: `✅ ${type} Sent Successfully!` });
 });
 
-// --- NO-SHOW AUTOMATION (NEW) ---
+// --- NO-SHOW AUTOMATION ---
 app.post('/courses/:id/auto-noshow', async (req, res) => {
   const { id } = req.params;
   try {
-    const result = await pool.query(`
-      UPDATE participants 
-      SET status = 'No-Show' 
-      WHERE course_id = $1 AND (status = 'No Response' OR status = 'Pending')
-    `, [id]);
+    const result = await pool.query(`UPDATE participants SET status = 'No-Show' WHERE course_id = $1 AND (status = 'No Response' OR status = 'Pending')`, [id]);
     res.json({ message: `✅ Processed ${result.rowCount} students as No-Show.` });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- EXISTING ENDPOINTS (Unchanged) ---
+// --- STANDARD ENDPOINTS ---
 app.get('/rooms', async (req, res) => { try { const result = await pool.query("SELECT * FROM rooms ORDER BY room_no ASC"); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.get('/rooms/occupancy', async (req, res) => { try { const query = `SELECT p.room_no, p.full_name, p.conf_no, p.status, p.gender, c.course_name FROM participants p JOIN courses c ON p.course_id = c.course_id WHERE p.room_no IS NOT NULL AND p.room_no != ''`; const result = await pool.query(query); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/rooms', async (req, res) => { const { roomNo, type } = req.body; try { const result = await pool.query("INSERT INTO rooms (room_no, gender_type) VALUES ($1, $2) RETURNING *", [roomNo, type]); res.json(result.rows[0]); } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Room already exists" }); res.status(500).json({ error: err.message }); } });
@@ -85,20 +66,3 @@ app.post('/api/integration/add-student', async (req, res) => { const { apiKey, c
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-// In handleAutoAssign...
-// Instead of the for loop:
-try {
-    const payload = updates.map(u => ({ id: u.participant_id, seat: u.dhamma_hall_seat_no }));
-    
-    await fetch(`${API_URL}/participants/bulk-seat-update`, { 
-        method: 'PUT', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ updates: payload }) 
-    });
-
-    alert("✅ Seats Assigned Instantly!"); 
-    loadStudents();
-} catch (err) {
-    console.error(err);
-}
