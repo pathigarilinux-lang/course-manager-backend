@@ -15,6 +15,62 @@ const pool = new Pool({
 const PROTECTED_ROOMS = new Set(["301AI","301BI","302AI","302BI","DF1","DF2","DF3"]); // (Keep your full list here)
 
 app.get('/', (req, res) => res.send('Backend Live'));
+// --- COURSES ENDPOINTS ---
+
+// GET all courses (used by the dropdowns)
+app.get('/courses', async (req, res) => {
+  try {
+    // Adjust table and column names based on your actual database schema
+    const result = await pool.query("SELECT course_id, course_name FROM courses ORDER BY course_name ASC");
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET stats for a specific course (used by the Dashboard)
+app.get('/courses/:id/stats', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // This is a placeholder. You need to write the actual SQL query to calculate
+    // arrived_m, arrived_f, old_students, new_students, etc. based on your schema.
+    // Example (this will need to be complex to get all stats):
+    // const result = await pool.query("SELECT COUNT(*) AS total FROM participants WHERE course_id = $1", [id]);
+    
+    // For now, to test the connection, you can return dummy data or an empty object.
+    res.json({}); 
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+
+// --- ROOMS ENDPOINTS ---
+
+// GET all rooms (used by Accommodation & Onboarding)
+app.get('/rooms', async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM rooms ORDER BY room_no ASC");
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET room occupancy (used to see which rooms are taken)
+app.get('/rooms/occupancy', async (req, res) => {
+  try {
+    // Select relevant details of participants who have been assigned a room
+    const result = await pool.query("SELECT participant_id, full_name, room_no, status, conf_no, gender, course_id FROM participants WHERE room_no IS NOT NULL");
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+
+// --- PARTICIPANTS ENDPOINTS ---
+
+// GET participants for a specific course (used by Onboarding & Manage Students)
+app.get('/courses/:id/participants', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query("SELECT * FROM participants WHERE course_id = $1 ORDER BY full_name ASC", [id]);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 // --- AUTOMATION: ARRIVAL & TOKEN GENERATION (STEP 1) ---
 app.post('/process/arrival', async (req, res) => {
