@@ -20,17 +20,24 @@ app.get('/', (req, res) => res.send('Backend is Live!'));
 app.post('/process/arrival', async (req, res) => {
   const { participantId, courseId } = req.body;
   try {
-    // Get next token number
-    const maxRes = await pool.query("SELECT MAX(token_number) as max_t FROM participants WHERE course_id = $1", [courseId]);
-    const nextToken = (maxRes.rows[0].max_t || 0) + 1;
+    const maxTokenRes = await pool.query("SELECT MAX(token_number) as max_token FROM participants WHERE course_id = $1", [courseId]);
+    const nextToken = (maxTokenRes.rows[0].max_token || 0) + 1;
 
-    // Update student: Token Assigned, Stage 1
     const result = await pool.query(
       "UPDATE participants SET token_number = $1, process_stage = 1, status = 'In Process' WHERE participant_id = $2 RETURNING *",
       [nextToken, participantId]
     );
+    
+    // SAFETY CHECK: If no row returned, send explicit error
+    if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Student not found." });
+    }
+    
     res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { 
+      console.error("Arrival Error:", err); // Log error to console
+      res.status(500).json({ error: err.message }); 
+  }
 });
 
 // --- AUTOMATION: STEP 2 & 3 (STAGES) ---
