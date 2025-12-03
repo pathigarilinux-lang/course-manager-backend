@@ -60,21 +60,56 @@ app.delete('/rooms/:id', async (req, res) => { try { const roomCheck = await poo
 
 // CHECK-IN (Modified for Stage 4 Logic)
 app.post('/check-in', async (req, res) => {
-  const { courseId, participantId, roomNo, seatNo, diningSeatType, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
-  try {
-    // CHECK STAGE: Must be at least Stage 3 (Interview Done)
-    const check = await pool.query("SELECT process_stage FROM participants WHERE participant_id = $1", [participantId]);
-    if (check.rows[0].process_stage < 3) {
-        return res.status(400).json({ error: "🛑 STOP: Student has not completed Teacher Interview." });
-    }
+    const { courseId, participantId, roomNo, seatNo, diningSeatType, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
+    try {
+        // --- STAGE CHECK IS REMOVED HERE ---
+        // The frontend assumes successful check-in means the student has ARRIVED.
+        // We ensure the status is set to 'Arrived' and process_stage is set to 4 (Onboarded).
+        // This makes the onboarding process direct.
+        // ---
 
-    const clean = (val) => (val && typeof val === 'string' && ['na', 'n/a', 'no', 'none', '-'].includes(val.trim().toLowerCase())) ? null : (val || null);
-    if (roomNo) { const roomCheck = await pool.query("SELECT p.full_name, c.course_name FROM participants p JOIN courses c ON p.course_id = c.course_id WHERE p.room_no = $1 AND p.status = 'Arrived' AND p.participant_id != $2", [roomNo, participantId]); if (roomCheck.rows.length > 0) { return res.status(409).json({ error: `🛑 Room ${roomNo} occupied by ${roomCheck.rows[0].full_name} (${roomCheck.rows[0].course_name})` }); } }
-    const query = `UPDATE participants SET status = 'Arrived', process_stage = 4, room_no = $1, dining_seat_no = $2, laundry_token_no = $3, mobile_locker_no = $4, valuables_locker_no = $5, discourse_language = $6, pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10, special_seating = $11, dining_seat_type = $12 WHERE participant_id = $13 AND course_id = $14 RETURNING *;`;
-    const values = [ clean(roomNo), clean(seatNo), clean(laundryToken), clean(mobileLocker), clean(valuablesLocker), language||'English', clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), clean(specialSeating), diningSeatType, participantId, courseId ];
-    const result = await pool.query(query, values);
-    res.json(result.rows[0]);
-  } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Duplicate data detected." }); res.status(500).json({ error: err.message }); }
+        const clean = (val) => (val && typeof val === 'string' && ['na', 'n/a', 'no', 'none', '-'].includes(val.trim().toLowerCase())) ? null : (val || null);
+        
+        // Room Occupancy Check
+        if (roomNo) { 
+            const roomCheck = await pool.query("SELECT p.full_name, c.course_name FROM participants p JOIN courses c ON p.course_id = c.course_id WHERE p.room_no = $1 AND p.status = 'Arrived' AND p.participant_id != $2", [roomNo, participantId]); 
+            if (roomCheck.rows.length > 0) { 
+                return res.status(409).json({ error: `🛑 Room ${roomNo} occupied by ${roomCheck.rows[0].full_name} (${roomCheck.rows[0].course_name})` }); 
+            } 
+        }
+
+        const query = `
+            UPDATE participants SET 
+                status = 'Arrived', 
+                process_stage = 4, 
+                room_no = $1, 
+                dining_seat_no = $2, 
+                laundry_token_no = $3, 
+                mobile_locker_no = $4, 
+                valuables_locker_no = $5, 
+                discourse_language = $6, 
+                pagoda_cell_no = $7, 
+                laptop_details = $8, 
+                conf_no = $9, 
+                dhamma_hall_seat_no = $10, 
+                special_seating = $11, 
+                dining_seat_type = $12 
+            WHERE participant_id = $13 
+            RETURNING *;
+        `;
+        const values = [ 
+            clean(roomNo), clean(seatNo), clean(laundryToken), clean(mobileLocker), clean(valuablesLocker), 
+            language||'English', clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), 
+            clean(specialSeating), diningSeatType, participantId 
+        ];
+        
+        const result = await pool.query(query, values);
+        res.json(result.rows[0]);
+    } catch (err) { 
+        if (err.code === '23505') return res.status(409).json({ error: "Duplicate data detected." }); 
+        console.error("Check-In Error:", err);
+        res.status(500).json({ error: err.message }); 
+    }
 });
 
 // --- STANDARD CRUD ---
