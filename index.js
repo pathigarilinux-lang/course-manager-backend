@@ -77,7 +77,20 @@ app.post('/check-in', async (req, res) => {
                 return res.status(409).json({ error: `🛑 Room ${roomNo} occupied by ${roomCheck.rows[0].full_name} (${roomCheck.rows[0].course_name})` }); 
             } 
         }
-
+// --- MAINTENANCE TOGGLE (Added for Staging) ---
+app.put('/rooms/:id/status', async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body; // Expects 'Active' or 'Maintenance'
+  try {
+    const result = await pool.query(
+      "UPDATE rooms SET status = $1 WHERE room_id = $2 RETURNING *",
+      [status, id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
         const query = `
             UPDATE participants SET 
                 status = 'Arrived', 
