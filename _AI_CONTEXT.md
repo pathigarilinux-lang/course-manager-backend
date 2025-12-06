@@ -25,31 +25,26 @@
   - `/check-in`: Updates status to 'Arrived' and assigns room/seats.
   - `/rooms`: Handles CRUD and Maintenance Status.
 
-## 4. DEPLOYMENT PIPELINE
-- **Production (Dhamma):** `main` branch -> Deploys to Render/Vercel (Prod DB).
-- **Staging:** `staging` branch -> Deploys to Render/Vercel (Staging DB).
+## 4. PROJECT STATUS (Checkpoint: Maintenance Mode Complete)
 
-"I am resuming work on Project Dhamma.
+### Infrastructure
+- **Staging Environment:** FULLY ACTIVE (Frontend on Vercel, Backend on Render, DB on Supabase).
+- **Production Environment:** Separate. currently behind Staging.
 
-1. Load Project Context: Please read my _AI_CONTEXT.md file from the backend repository to understand the core architecture (Vercel/Render/Supabase) and the 'Dhamma' stable release rules.
+### Completed Features
+1. **Room Maintenance Mode:** - DB: `is_maintenance` boolean column added.
+   - Backend: `GET /rooms` includes flag, `PUT /rooms/:id` updates flag.
+   - Frontend: 
+     - 🛠️ Icon visible and clickable.
+     - Rooms turn Gray.
+     - "Student Onboarding" dropdown filters out maintenance rooms.
 
-2. Current Session Status:
-
-Infrastructure: We successfully built a Staging Environment (Frontend + Backend + DB) separate from Production.
-
-Branching: We are currently working on the staging branch.
-
-Current Feature: We are building the 'Room Maintenance Mode' (Gray out rooms).
-
-Last Action: We just updated src/App.jsx on the Staging Frontend to include the renderRoom logic with the Wrench 🛠️ icon.
-
-3. Immediate Goal: We need to verify that the Wrench icons are visible on the Staging Site. If they work, we will merge Staging into Main (Production) and update the Production Database."
-
-2. Your Morning Checklist
-When you sit down tomorrow, do these 3 physical things before pasting that prompt:
-
-Open GitHub: Make sure you have your Backend and Frontend tabs open and switched to the staging branch.
-
+### Current Mission (Next Session)
+1. **URL Renaming:** Rename Vercel domains to `zero-day-stg` / `zero-day-prod`.
+2. **Production Merge:** Merge Staging code into Main branch to release Maintenance Mode to live users.
+3. **Verification:** Ensure Production DB has the `is_maintenance` column added.
 Open Supabase: Have your Staging database dashboard open.
 
 Open Vercel: Have your Staging project dashboard open.
+
+
