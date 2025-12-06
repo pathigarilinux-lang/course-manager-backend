@@ -57,7 +57,8 @@ app.get('/rooms', async (req, res) => { try { const result = await pool.query("S
 app.get('/rooms/occupancy', async (req, res) => { try { const query = `SELECT p.room_no, p.full_name, p.conf_no, p.status, p.gender, c.course_name FROM participants p JOIN courses c ON p.course_id = c.course_id WHERE p.room_no IS NOT NULL AND p.room_no != ''`; const result = await pool.query(query); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/rooms', async (req, res) => { const { roomNo, type } = req.body; try { const result = await pool.query("INSERT INTO rooms (room_no, gender_type) VALUES ($1, $2) RETURNING *", [roomNo, type]); res.json(result.rows[0]); } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Room already exists" }); res.status(500).json({ error: err.message }); } });
 app.delete('/rooms/:id', async (req, res) => { try { const roomCheck = await pool.query("SELECT room_no FROM rooms WHERE room_id = $1", [req.params.id]); if (roomCheck.rows.length > 0) { const roomNo = roomCheck.rows[0].room_no; if (PROTECTED_ROOMS.has(roomNo)) return res.status(403).json({ error: `🚫 ${roomNo} is Protected. Cannot delete.` }); } await pool.query("DELETE FROM rooms WHERE room_id = $1", [req.params.id]); res.json({ message: "Room deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
-// --- ADD THIS NEW ENDPOINT ---
+
+// --- MAINTENANCE TOGGLE (Correct Location) ---
 app.put('/rooms/:id', async (req, res) => {
   const { id } = req.params;
   const { is_maintenance } = req.body;
@@ -99,20 +100,7 @@ app.post('/check-in', async (req, res) => {
                 return res.status(409).json({ error: `🛑 Room ${roomNo} occupied by ${roomCheck.rows[0].full_name} (${roomCheck.rows[0].course_name})` }); 
             } 
         }
-// --- MAINTENANCE TOGGLE (Added for Staging) ---
-app.put('/rooms/:id/status', async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body; // Expects 'Active' or 'Maintenance'
-  try {
-    const result = await pool.query(
-      "UPDATE rooms SET status = $1 WHERE room_id = $2 RETURNING *",
-      [status, id]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+
         const query = `
             UPDATE participants SET 
                 status = 'Arrived', 
