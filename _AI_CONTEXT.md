@@ -28,3 +28,28 @@
 ## 4. DEPLOYMENT PIPELINE
 - **Production (Dhamma):** `main` branch -> Deploys to Render/Vercel (Prod DB).
 - **Staging:** `staging` branch -> Deploys to Render/Vercel (Staging DB).
+
+"I am resuming work on Project Dhamma.
+
+1. Load Project Context: Please read my _AI_CONTEXT.md file from the backend repository to understand the core architecture (Vercel/Render/Supabase) and the 'Dhamma' stable release rules.
+
+2. Current Session Status:
+
+Infrastructure: We successfully built a Staging Environment (Frontend + Backend + DB) separate from Production.
+
+Branching: We are currently working on the staging branch.
+
+Current Feature: We are building the 'Room Maintenance Mode' (Gray out rooms).
+
+Last Action: We just updated src/App.jsx on the Staging Frontend to include the renderRoom logic with the Wrench 🛠️ icon.
+
+3. Immediate Goal: We need to verify that the Wrench icons are visible on the Staging Site. If they work, we will merge Staging into Main (Production) and update the Production Database."
+
+2. Your Morning Checklist
+When you sit down tomorrow, do these 3 physical things before pasting that prompt:
+
+Open GitHub: Make sure you have your Backend and Frontend tabs open and switched to the staging branch.
+
+Open Supabase: Have your Staging database dashboard open.
+
+Open Vercel: Have your Staging project dashboard open.
