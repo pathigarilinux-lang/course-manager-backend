@@ -17,16 +17,15 @@ app.get('/rooms', async (req, res) => {
   try { 
     const result = await pool.query("SELECT * FROM rooms ORDER BY room_no ASC"); 
     res.json(result.rows); 
-  } catch (err) { res.status(500).json({ error: err.message }); } 
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); } 
 });
 
 app.get('/rooms/occupancy', async (req, res) => { 
   try { 
-    // Only 'Attending' students occupy rooms technically, but we check room_no column
     const query = `SELECT p.room_no, p.full_name, p.conf_no, p.status, p.gender, c.course_name, p.participant_id, p.course_id FROM participants p JOIN courses c ON p.course_id = c.course_id WHERE p.room_no IS NOT NULL AND p.room_no != ''`; 
     const result = await pool.query(query); 
     res.json(result.rows); 
-  } catch (err) { res.status(500).json({ error: err.message }); } 
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); } 
 });
 
 app.post('/rooms', async (req, res) => { 
@@ -50,24 +49,22 @@ app.post('/check-in', async (req, res) => {
             if (roomCheck.rows.length > 0) return res.status(409).json({ error: `Room occupied by ${roomCheck.rows[0].full_name}` }); 
         }
 
-        // STATUS UPDATES TO 'Attending' (Fully Onboarded)
         const query = `UPDATE participants SET status = 'Attending', process_stage = 4, room_no = $1, dining_seat_no = $2, laundry_token_no = $3, mobile_locker_no = $4, valuables_locker_no = $5, discourse_language = $6, pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10, special_seating = $11, dining_seat_type = $12 WHERE participant_id = $13 RETURNING *;`;
         const values = [ clean(roomNo), clean(seatNo), clean(laundryToken), clean(mobileLocker), clean(valuablesLocker), language||'English', clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), clean(specialSeating), diningSeatType, participantId ];
         
         const result = await pool.query(query, values);
         res.json(result.rows[0]);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { console.error("Check-in Error:", err); res.status(500).json({ error: err.message }); }
 });
 
 // --- GATE CHECK-IN (NEW) ---
 app.post('/gate-checkin', async (req, res) => {
     const { participantId } = req.body;
     try {
-        // Only update if not already Attending
-        const result = await pool.query("UPDATE participants SET status = 'Gate Check-In' WHERE participant_id = $1 AND status != 'Attending' RETURNING *", [participantId]);
-        if (result.rows.length === 0) return res.status(400).json({ error: "Student already processed or not found." });
+        const result = await pool.query("UPDATE participants SET status = 'Gate Check-In' WHERE participant_id = $1 RETURNING *", [participantId]);
+        if (result.rows.length === 0) return res.status(400).json({ error: "Student not found." });
         res.json(result.rows[0]);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { console.error("Gate Check-in Error:", err); res.status(500).json({ error: err.message }); }
 });
 
 // --- PARTICIPANTS CRUD ---
@@ -77,52 +74,27 @@ app.put('/participants/:id', async (req, res) => { const { id } = req.params; co
 app.get('/courses', async (req, res) => { try { const query = `SELECT c.*, COUNT(CASE WHEN p.status = 'Attending' THEN 1 END)::int as arrived, COUNT(CASE WHEN p.status = 'Gate Check-In' THEN 1 END)::int as gate, COUNT(CASE WHEN p.status = 'No Response' THEN 1 END)::int as pending, COUNT(CASE WHEN p.status = 'Cancelled' THEN 1 END)::int as cancelled FROM courses c LEFT JOIN participants p ON c.course_id = p.course_id GROUP BY c.course_id ORDER BY c.start_date DESC`; const result = await pool.query(query); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/courses', async (req, res) => { const { courseName, teacherName, startDate, endDate } = req.body; try { const result = await pool.query("INSERT INTO courses (course_name, teacher_name, start_date, end_date) VALUES ($1, $2, $3, $4) RETURNING *", [courseName, teacherName, startDate, endDate]); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-// --- DASHBOARD STATS LOGIC (UPDATED) ---
+// --- DASHBOARD STATS LOGIC ---
 app.get('/courses/:id/stats', async (req, res) => { 
   try { 
     const result = await pool.query("SELECT status, conf_no, gender FROM participants WHERE course_id = $1", [req.params.id]); 
-    
-    // Initialize counters
     const stats = { 
         attending: 0, gate_checkin: 0, no_response: 0, cancelled: 0, 
         om: 0, of: 0, nm: 0, nf: 0, sm: 0, sf: 0, 
-        attending_m: 0, attending_f: 0, 
-        gate_m: 0, gate_f: 0,
-        pending_m: 0, pending_f: 0, 
+        attending_m: 0, attending_f: 0, gate_m: 0, gate_f: 0, pending_m: 0, pending_f: 0, 
         languages: [] 
     }; 
-
     result.rows.forEach(p => { 
         const isMale = p.gender && p.gender.toLowerCase() === 'male'; 
-        
-        if (p.status === 'Attending' || p.status === 'Arrived') { // Backward compatibility
-            stats.attending++; 
-            if(isMale) stats.attending_m++; else stats.attending_f++; 
-            
-            // Demographics only for Attending
-            if (p.conf_no) {
-                const code = p.conf_no.trim().toUpperCase();
-                if (code.startsWith('OM')) stats.om++;
-                else if (code.startsWith('OF')) stats.of++;
-                else if (code.startsWith('NM')) stats.nm++;
-                else if (code.startsWith('NF')) stats.nf++;
-                else if (code.startsWith('SM')) stats.sm++;
-                else if (code.startsWith('SF')) stats.sf++;
-            }
-        } else if (p.status === 'Gate Check-In') {
-            stats.gate_checkin++;
-            if(isMale) stats.gate_m++; else stats.gate_f++;
-        } else if (p.status === 'No Response') { 
-            stats.no_response++; 
-            if(isMale) stats.pending_m++; else stats.pending_f++; 
-        } else if (p.status === 'Cancelled') { 
-            stats.cancelled++; 
-        } 
+        if (p.status === 'Attending' || p.status === 'Arrived') { 
+            stats.attending++; if(isMale) stats.attending_m++; else stats.attending_f++; 
+            if (p.conf_no) { const code = p.conf_no.trim().toUpperCase(); if (code.startsWith('O')) stats.om++; else if (code.startsWith('N')) stats.nm++; else if (code.startsWith('S')) stats.sm++; }
+        } else if (p.status === 'Gate Check-In') { stats.gate_checkin++; if(isMale) stats.gate_m++; else stats.gate_f++; 
+        } else if (p.status === 'No Response') { stats.no_response++; if(isMale) stats.pending_m++; else stats.pending_f++; 
+        } else if (p.status === 'Cancelled') { stats.cancelled++; } 
     }); 
-    
     const langResult = await pool.query("SELECT discourse_language, COUNT(*) as total, COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count, COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count FROM participants WHERE course_id = $1 AND status = 'Attending' GROUP BY discourse_language ORDER BY total DESC", [req.params.id]); 
     stats.languages = langResult.rows; 
-    
     res.json(stats); 
   } catch (err) { res.status(500).json({ error: err.message }); } 
 });
