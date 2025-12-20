@@ -57,7 +57,7 @@ app.post('/check-in', async (req, res) => {
     } catch (err) { console.error("Check-in Error:", err); res.status(500).json({ error: err.message }); }
 });
 
-// --- GATE CHECK-IN (NEW) ---
+// --- GATE ACTIONS ---
 app.post('/gate-checkin', async (req, res) => {
     const { participantId } = req.body;
     try {
@@ -65,6 +65,16 @@ app.post('/gate-checkin', async (req, res) => {
         if (result.rows.length === 0) return res.status(400).json({ error: "Student not found." });
         res.json(result.rows[0]);
     } catch (err) { console.error("Gate Check-in Error:", err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/gate-cancel', async (req, res) => {
+    const { participantId } = req.body;
+    try {
+        // Only allow cancelling if they are NOT already attending (safety check)
+        const result = await pool.query("UPDATE participants SET status = 'Cancelled' WHERE participant_id = $1 AND status != 'Attending' RETURNING *", [participantId]);
+        if (result.rows.length === 0) return res.status(400).json({ error: "Cannot cancel attending student or student not found." });
+        res.json(result.rows[0]);
+    } catch (err) { console.error("Gate Cancel Error:", err); res.status(500).json({ error: err.message }); }
 });
 
 // --- PARTICIPANTS CRUD ---
