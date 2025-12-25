@@ -70,7 +70,6 @@ app.post('/gate-checkin', async (req, res) => {
 app.post('/gate-cancel', async (req, res) => {
     const { participantId } = req.body;
     try {
-        // Only allow cancelling if they are NOT already attending (safety check)
         const result = await pool.query("UPDATE participants SET status = 'Cancelled' WHERE participant_id = $1 AND status != 'Attending' RETURNING *", [participantId]);
         if (result.rows.length === 0) return res.status(400).json({ error: "Cannot cancel attending student or student not found." });
         res.json(result.rows[0]);
@@ -82,7 +81,30 @@ app.put('/participants/:id', async (req, res) => { const { id } = req.params; co
 
 // --- COURSES & STATS ---
 app.get('/courses', async (req, res) => { try { const query = `SELECT c.*, COUNT(CASE WHEN p.status = 'Attending' THEN 1 END)::int as arrived, COUNT(CASE WHEN p.status = 'Gate Check-In' THEN 1 END)::int as gate, COUNT(CASE WHEN p.status = 'No Response' THEN 1 END)::int as pending, COUNT(CASE WHEN p.status = 'Cancelled' THEN 1 END)::int as cancelled FROM courses c LEFT JOIN participants p ON c.course_id = p.course_id GROUP BY c.course_id ORDER BY c.start_date DESC`; const result = await pool.query(query); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/courses', async (req, res) => { const { courseName, teacherName, startDate, endDate } = req.body; try { const result = await pool.query("INSERT INTO courses (course_name, teacher_name, start_date, end_date) VALUES ($1, $2, $3, $4) RETURNING *", [courseName, teacherName, startDate, endDate]); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
+
+app.post('/courses', async (req, res) => { 
+    const { courseName, teacherName, startDate, endDate } = req.body; 
+    try { 
+        const result = await pool.query("INSERT INTO courses (course_name, teacher_name, start_date, end_date) VALUES ($1, $2, $3, $4) RETURNING *", [courseName, teacherName, startDate, endDate]); 
+        res.json(result.rows[0]); 
+    } catch (err) { res.status(500).json({ error: err.message }); } 
+});
+
+// ✅ NEW: UPDATE COURSE (Fixes Error 404)
+app.put('/courses/:id', async (req, res) => {
+    const { id } = req.params;
+    const { courseName, teacherName, startDate, endDate } = req.body;
+    try {
+        const result = await pool.query(
+            "UPDATE courses SET course_name=$1, teacher_name=$2, start_date=$3, end_date=$4 WHERE course_id=$5 RETURNING *",
+            [courseName, teacherName, startDate, endDate, id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: "Course not found" });
+        res.json({ message: "Course updated successfully", course: result.rows[0] });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // --- DASHBOARD STATS LOGIC ---
 app.get('/courses/:id/stats', async (req, res) => { 
