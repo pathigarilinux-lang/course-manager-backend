@@ -139,7 +139,9 @@ app.post('/expenses', async (req, res) => { const { courseId, participantId, typ
 app.put('/expenses/:id', async (req, res) => { const { expense_type, amount } = req.body; try { const result = await pool.query("UPDATE expenses SET expense_type=$1, amount=$2 WHERE expense_id=$3 RETURNING *", [expense_type, amount, req.params.id]); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.delete('/expenses/:id', async (req, res) => { try { await pool.query("DELETE FROM expenses WHERE expense_id = $1", [req.params.id]); res.json({ message: "Expense deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.get('/participants/:id/expenses', async (req, res) => { try { const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
-// ✅ REPLACEMENT ENDPOINT: Financial Report (Fixes Paid List)
+// ✅ REPLACEMENT ENDPOINT in backend/index.js
+// This calculates Laundry vs Shop totals separately and includes PAID students.
+
 app.get('/courses/:id/financial-report', async (req, res) => { 
   try { 
     const query = `
@@ -147,10 +149,19 @@ app.get('/courses/:id/financial-report', async (req, res) => {
         p.full_name, 
         p.room_no, 
         p.dining_seat_no, 
-        -- Calculate Total Spent (Ignore payments for this column)
+        
+        -- 1. Laundry Total (Positive amounts containing 'Laundry')
+        COALESCE(SUM(CASE WHEN e.expense_type ILIKE '%Laundry%' AND e.amount > 0 THEN e.amount ELSE 0 END), 0) as laundry_total,
+
+        -- 2. Shop Total (Positive amounts, NOT Laundry, NOT Payments)
+        COALESCE(SUM(CASE WHEN e.expense_type NOT ILIKE '%Laundry%' AND e.expense_type NOT ILIKE '%Payment%' AND e.amount > 0 THEN e.amount ELSE 0 END), 0) as shop_total,
+
+        -- 3. Total Bill (Total Spending)
         COALESCE(SUM(CASE WHEN e.amount > 0 THEN e.amount ELSE 0 END), 0) as total_bill, 
-        -- Calculate Balance (Spent - Paid)
+        
+        -- 4. Net Due (Spending minus Payments)
         COALESCE(SUM(e.amount), 0) as total_due 
+
       FROM participants p 
       LEFT JOIN expenses e ON p.participant_id = e.participant_id 
       WHERE p.course_id = $1 
