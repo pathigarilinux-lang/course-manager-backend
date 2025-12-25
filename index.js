@@ -139,7 +139,31 @@ app.post('/expenses', async (req, res) => { const { courseId, participantId, typ
 app.put('/expenses/:id', async (req, res) => { const { expense_type, amount } = req.body; try { const result = await pool.query("UPDATE expenses SET expense_type=$1, amount=$2 WHERE expense_id=$3 RETURNING *", [expense_type, amount, req.params.id]); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.delete('/expenses/:id', async (req, res) => { try { await pool.query("DELETE FROM expenses WHERE expense_id = $1", [req.params.id]); res.json({ message: "Expense deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.get('/participants/:id/expenses', async (req, res) => { try { const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/courses/:id/financial-report', async (req, res) => { try { const query = `SELECT p.full_name, p.room_no, p.dining_seat_no, COALESCE(SUM(e.amount), 0) as total_due FROM participants p LEFT JOIN expenses e ON p.participant_id = e.participant_id WHERE p.course_id = $1 GROUP BY p.participant_id, p.full_name, p.room_no, p.dining_seat_no HAVING SUM(e.amount) > 0 ORDER BY p.full_name ASC`; const result = await pool.query(query, [req.params.id]); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
+// ✅ REPLACEMENT ENDPOINT: Financial Report (Fixes Paid List)
+app.get('/courses/:id/financial-report', async (req, res) => { 
+  try { 
+    const query = `
+      SELECT 
+        p.full_name, 
+        p.room_no, 
+        p.dining_seat_no, 
+        -- Calculate Total Spent (Ignore payments for this column)
+        COALESCE(SUM(CASE WHEN e.amount > 0 THEN e.amount ELSE 0 END), 0) as total_bill, 
+        -- Calculate Balance (Spent - Paid)
+        COALESCE(SUM(e.amount), 0) as total_due 
+      FROM participants p 
+      LEFT JOIN expenses e ON p.participant_id = e.participant_id 
+      WHERE p.course_id = $1 
+      GROUP BY p.participant_id, p.full_name, p.room_no, p.dining_seat_no 
+      ORDER BY p.full_name ASC
+    `; 
+    
+    const result = await pool.query(query, [req.params.id]); 
+    res.json(result.rows); 
+  } catch (err) { 
+    res.status(500).json({ error: err.message }); 
+  } 
+});
 app.delete('/courses/:id/reset', async (req, res) => { const client = await pool.connect(); try { await client.query('BEGIN'); await client.query('DELETE FROM expenses WHERE course_id = $1', [req.params.id]); await client.query('DELETE FROM participants WHERE course_id = $1', [req.params.id]); await client.query('COMMIT'); res.json({ message: "Course reset" }); } catch (err) { await client.query('ROLLBACK'); res.status(500).json({ error: err.message }); } finally { client.release(); } });
 app.delete('/courses/:id', async (req, res) => { try { await pool.query('DELETE FROM expenses WHERE course_id = $1', [req.params.id]); await pool.query('DELETE FROM participants WHERE course_id = $1', [req.params.id]); await pool.query('DELETE FROM courses WHERE course_id = $1', [req.params.id]); res.json({ message: "Course deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/notify', async (req, res) => { const { type, participantId } = req.body; console.log(`Notification ${type} for ${participantId}`); res.json({message:'Sent'}); });
