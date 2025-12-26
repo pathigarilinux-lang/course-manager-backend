@@ -80,7 +80,32 @@ app.post('/gate-cancel', async (req, res) => {
 app.put('/participants/:id', async (req, res) => { const { id } = req.params; const { full_name, phone_number, status, room_no, dining_seat_no, dining_seat_type, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked, mobile_locker_no, valuables_locker_no, laundry_token_no } = req.body; try { const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null); const result = await pool.query( `UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9, discourse_language=$10, dining_seat_type=$11, evening_food=$12, medical_info=$13, teacher_notes=$14, process_stage=$15, token_number=$16, is_seat_locked=$17, mobile_locker_no=$19, valuables_locker_no=$20, laundry_token_no=$21 WHERE participant_id=$18 RETURNING *`, [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), discourse_language, dining_seat_type, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked || false, id, clean(mobile_locker_no), clean(valuables_locker_no), clean(laundry_token_no)] ); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
 
 // --- COURSES & STATS ---
-app.get('/courses', async (req, res) => { try { const query = `SELECT c.*, COUNT(CASE WHEN p.status = 'Attending' THEN 1 END)::int as arrived, COUNT(CASE WHEN p.status = 'Gate Check-In' THEN 1 END)::int as gate, COUNT(CASE WHEN p.status = 'No Response' THEN 1 END)::int as pending, COUNT(CASE WHEN p.status = 'Cancelled' THEN 1 END)::int as cancelled FROM courses c LEFT JOIN participants p ON c.course_id = p.course_id GROUP BY c.course_id ORDER BY c.start_date DESC`; const result = await pool.query(query); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
+// ✅ REPLACEMENT ENDPOINT in backend/index.js
+// Fixes "Arrived" count to include students currently at the Gate
+app.get('/courses', async (req, res) => { 
+  try { 
+    const query = `
+      SELECT 
+        c.*, 
+        -- "Arrived" now counts BOTH 'Attending' AND 'Gate Check-In'
+        COUNT(CASE WHEN p.status IN ('Attending', 'Gate Check-In') THEN 1 END)::int as arrived,
+        
+        -- We keep 'gate' separate just in case you want to see who is waiting at the gate
+        COUNT(CASE WHEN p.status = 'Gate Check-In' THEN 1 END)::int as gate,
+        
+        COUNT(CASE WHEN p.status = 'No Response' OR p.status = 'Pending' THEN 1 END)::int as pending,
+        COUNT(CASE WHEN p.status = 'Cancelled' THEN 1 END)::int as cancelled 
+      FROM courses c 
+      LEFT JOIN participants p ON c.course_id = p.course_id 
+      GROUP BY c.course_id 
+      ORDER BY c.start_date DESC
+    `; 
+    const result = await pool.query(query); 
+    res.json(result.rows); 
+  } catch (err) { 
+    res.status(500).json({ error: err.message }); 
+  } 
+});
 
 app.post('/courses', async (req, res) => { 
     const { courseName, teacherName, startDate, endDate } = req.body; 
