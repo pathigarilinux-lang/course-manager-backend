@@ -223,4 +223,37 @@ app.post('/courses/:id/auto-noshow', async (req, res) => { try { await pool.quer
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 const PORT = process.env.PORT || 3000;
+// ✅ NEW: GLOBAL CONFLICT CHECK
+// Finds occupied Dining/Pagoda seats across ALL overlapping courses
+app.get('/courses/:id/global-occupied', async (req, res) => {
+    const { id } = req.params;
+    try {
+        // 1. Get Date Range of Current Course
+        const courseRes = await pool.query("SELECT start_date, end_date FROM courses WHERE course_id = $1", [id]);
+        if (courseRes.rows.length === 0) return res.json({ dining: [], pagoda: [] });
+        
+        const { start_date, end_date } = courseRes.rows[0];
+
+        // 2. Find ALL occupied seats in ANY course that overlaps with this time window
+        // Logic: (CourseStart <= TargetEnd) AND (CourseEnd >= TargetStart) = Overlap
+        const query = `
+            SELECT p.dining_seat_no, p.pagoda_cell_no
+            FROM participants p
+            JOIN courses c ON p.course_id = c.course_id
+            WHERE p.status IN ('Attending', 'Gate Check-In') 
+            AND p.course_id != $1
+            AND (c.start_date <= $3 AND c.end_date >= $2)
+        `;
+        
+        const result = await pool.query(query, [id, start_date, end_date]);
+        
+        const dining = result.rows.filter(r => r.dining_seat_no).map(r => r.dining_seat_no.trim());
+        const pagoda = result.rows.filter(r => r.pagoda_cell_no).map(r => r.pagoda_cell_no.trim());
+
+        res.json({ dining, pagoda });
+    } catch (err) {
+        console.error("Global Occupancy Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
