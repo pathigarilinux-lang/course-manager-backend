@@ -12,6 +12,23 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// ✅ HELPER: GLOBAL LAUNDRY DUPLICATE CHECKER
+// Scans ALL active participants in ALL courses to ensure unique token
+const checkGlobalLaundryDuplicate = async (token, excludeParticipantId) => {
+    if (!token || ['na', 'n/a', 'none', '-', ''].includes(token.toString().trim().toLowerCase())) return null;
+    
+    const query = `
+        SELECT p.full_name, c.course_name 
+        FROM participants p
+        JOIN courses c ON p.course_id = c.course_id
+        WHERE p.laundry_token_no = $1 
+        AND p.status IN ('Attending', 'Gate Check-In')
+        AND p.participant_id != $2
+    `;
+    const res = await pool.query(query, [token, excludeParticipantId || -1]);
+    return res.rows.length > 0 ? res.rows[0] : null;
+};
+
 // --- ROOMS ENDPOINTS ---
 app.get('/rooms', async (req, res) => { 
   try { 
@@ -39,6 +56,7 @@ app.post('/rooms', async (req, res) => {
 app.delete('/rooms/:id', async (req, res) => { try { await pool.query("DELETE FROM rooms WHERE room_id = $1", [req.params.id]); res.json({ message: "Room deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
 // --- CHECK-IN (ONBOARDING) ---
+// ✅ Updated to include Laundry Check
 app.post('/check-in', async (req, res) => {
     const { participantId, roomNo, seatNo, diningSeatType, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
     try {
@@ -47,6 +65,16 @@ app.post('/check-in', async (req, res) => {
         if (roomNo) { 
             const roomCheck = await pool.query("SELECT p.full_name FROM participants p WHERE p.room_no = $1 AND p.status = 'Attending' AND p.participant_id != $2", [roomNo, participantId]); 
             if (roomCheck.rows.length > 0) return res.status(409).json({ error: `Room occupied by ${roomCheck.rows[0].full_name}` }); 
+        }
+
+        // 🛡️ BLOCK DUPLICATE TOKENS
+        if (laundryToken) {
+            const conflict = await checkGlobalLaundryDuplicate(laundryToken, participantId);
+            if (conflict) {
+                return res.status(409).json({ 
+                    error: `Laundry Token ${laundryToken} is already assigned to ${conflict.full_name} (${conflict.course_name}).` 
+                });
+            }
         }
 
         const query = `UPDATE participants SET status = 'Attending', process_stage = 4, room_no = $1, dining_seat_no = $2, laundry_token_no = $3, mobile_locker_no = $4, valuables_locker_no = $5, discourse_language = $6, pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10, special_seating = $11, dining_seat_type = $12 WHERE participant_id = $13 RETURNING *;`;
@@ -77,7 +105,30 @@ app.post('/gate-cancel', async (req, res) => {
 });
 
 // --- PARTICIPANTS CRUD ---
-app.put('/participants/:id', async (req, res) => { const { id } = req.params; const { full_name, phone_number, status, room_no, dining_seat_no, dining_seat_type, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked, mobile_locker_no, valuables_locker_no, laundry_token_no } = req.body; try { const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null); const result = await pool.query( `UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9, discourse_language=$10, dining_seat_type=$11, evening_food=$12, medical_info=$13, teacher_notes=$14, process_stage=$15, token_number=$16, is_seat_locked=$17, mobile_locker_no=$19, valuables_locker_no=$20, laundry_token_no=$21 WHERE participant_id=$18 RETURNING *`, [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), discourse_language, dining_seat_type, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked || false, id, clean(mobile_locker_no), clean(valuables_locker_no), clean(laundry_token_no)] ); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
+// ✅ Updated to include Laundry Check
+app.put('/participants/:id', async (req, res) => { 
+    const { id } = req.params; 
+    const { full_name, phone_number, status, room_no, dining_seat_no, dining_seat_type, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked, mobile_locker_no, valuables_locker_no, laundry_token_no } = req.body; 
+    try { 
+        const clean = (val) => (val && ['na','n/a','none'].includes(val.toLowerCase())) ? null : (val || null); 
+        
+        // 🛡️ BLOCK DUPLICATE TOKENS
+        if (laundry_token_no) {
+            const conflict = await checkGlobalLaundryDuplicate(laundry_token_no, id);
+            if (conflict) {
+                return res.status(409).json({ 
+                    error: `Laundry Token ${laundry_token_no} is already assigned to ${conflict.full_name} (${conflict.course_name}).` 
+                });
+            }
+        }
+
+        const result = await pool.query( 
+            `UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9, discourse_language=$10, dining_seat_type=$11, evening_food=$12, medical_info=$13, teacher_notes=$14, process_stage=$15, token_number=$16, is_seat_locked=$17, mobile_locker_no=$19, valuables_locker_no=$20, laundry_token_no=$21 WHERE participant_id=$18 RETURNING *`, 
+            [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), discourse_language, dining_seat_type, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked || false, id, clean(mobile_locker_no), clean(valuables_locker_no), clean(laundry_token_no)] 
+        ); 
+        res.json(result.rows[0]); 
+    } catch (err) { res.status(500).json({ error: err.message }); } 
+});
 
 // --- COURSES & STATS ---
 app.get('/courses', async (req, res) => { 
@@ -162,18 +213,15 @@ app.delete('/courses/:id', async (req, res) => { try { await pool.query('DELETE 
 app.post('/notify', async (req, res) => { const { type, participantId } = req.body; console.log(`Notification ${type} for ${participantId}`); res.json({message:'Sent'}); });
 app.post('/courses/:id/auto-noshow', async (req, res) => { try { await pool.query("UPDATE participants SET status='No-Show' WHERE course_id=$1 AND status IN ('No Response','Pending')", [req.params.id]); res.json({message:'Done'}); } catch(err) { res.status(500).json({error:err.message}); } });
 
-// ✅ NEW: GLOBAL CONFLICT CHECK (With Course Tags)
-// Finds occupied Dining/Pagoda seats across ALL overlapping courses AND identifies the course.
+// ✅ GLOBAL CONFLICT CHECK
 app.get('/courses/:id/global-occupied', async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. Get Date Range of Current Course
         const courseRes = await pool.query("SELECT start_date, end_date FROM courses WHERE course_id = $1", [id]);
         if (courseRes.rows.length === 0) return res.json({ dining: [], pagoda: [] });
         
         const { start_date, end_date } = courseRes.rows[0];
 
-        // 2. Find ALL occupied seats + Course Name
         const query = `
             SELECT p.dining_seat_no, p.pagoda_cell_no, c.course_name
             FROM participants p
@@ -185,25 +233,12 @@ app.get('/courses/:id/global-occupied', async (req, res) => {
         
         const result = await pool.query(query, [id, start_date, end_date]);
         
-        // Helper to create a short tag (e.g. "30-Day Satipatthana" -> "30D")
-        const getTag = (name) => {
-            const match = name.match(/(\d+)/);
-            return match ? `${match[1]}d` : name.substring(0, 3).toUpperCase();
-        };
-
-        const dining = result.rows
-            .filter(r => r.dining_seat_no)
-            .map(r => ({ seat: r.dining_seat_no.trim(), tag: getTag(r.course_name) }));
-            
-        const pagoda = result.rows
-            .filter(r => r.pagoda_cell_no)
-            .map(r => ({ cell: r.pagoda_cell_no.trim(), tag: getTag(r.course_name) }));
+        const getTag = (name) => { const match = name.match(/(\d+)/); return match ? `${match[1]}d` : name.substring(0, 3).toUpperCase(); };
+        const dining = result.rows.filter(r => r.dining_seat_no).map(r => ({ seat: r.dining_seat_no.trim(), tag: getTag(r.course_name) }));
+        const pagoda = result.rows.filter(r => r.pagoda_cell_no).map(r => ({ cell: r.pagoda_cell_no.trim(), tag: getTag(r.course_name) }));
 
         res.json({ dining, pagoda });
-    } catch (err) {
-        console.error("Global Occupancy Error:", err);
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { console.error("Global Occupancy Error:", err); res.status(500).json({ error: err.message }); }
 });
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
