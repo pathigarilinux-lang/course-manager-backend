@@ -225,6 +225,8 @@ app.get('/', (req, res) => res.send('Backend is Live!'));
 const PORT = process.env.PORT || 3000;
 // ✅ NEW: GLOBAL CONFLICT CHECK
 // Finds occupied Dining/Pagoda seats across ALL overlapping courses
+// ✅ NEW: GLOBAL CONFLICT CHECK (With Course Tags)
+// Finds occupied Dining/Pagoda seats across ALL overlapping courses AND identifies the course.
 app.get('/courses/:id/global-occupied', async (req, res) => {
     const { id } = req.params;
     try {
@@ -234,10 +236,9 @@ app.get('/courses/:id/global-occupied', async (req, res) => {
         
         const { start_date, end_date } = courseRes.rows[0];
 
-        // 2. Find ALL occupied seats in ANY course that overlaps with this time window
-        // Logic: (CourseStart <= TargetEnd) AND (CourseEnd >= TargetStart) = Overlap
+        // 2. Find ALL occupied seats + Course Name
         const query = `
-            SELECT p.dining_seat_no, p.pagoda_cell_no
+            SELECT p.dining_seat_no, p.pagoda_cell_no, c.course_name
             FROM participants p
             JOIN courses c ON p.course_id = c.course_id
             WHERE p.status IN ('Attending', 'Gate Check-In') 
@@ -247,8 +248,19 @@ app.get('/courses/:id/global-occupied', async (req, res) => {
         
         const result = await pool.query(query, [id, start_date, end_date]);
         
-        const dining = result.rows.filter(r => r.dining_seat_no).map(r => r.dining_seat_no.trim());
-        const pagoda = result.rows.filter(r => r.pagoda_cell_no).map(r => r.pagoda_cell_no.trim());
+        // Helper to create a short tag (e.g. "30-Day Satipatthana" -> "30D")
+        const getTag = (name) => {
+            const match = name.match(/(\d+)/);
+            return match ? `${match[1]}d` : name.substring(0, 3).toUpperCase();
+        };
+
+        const dining = result.rows
+            .filter(r => r.dining_seat_no)
+            .map(r => ({ seat: r.dining_seat_no.trim(), tag: getTag(r.course_name) }));
+            
+        const pagoda = result.rows
+            .filter(r => r.pagoda_cell_no)
+            .map(r => ({ cell: r.pagoda_cell_no.trim(), tag: getTag(r.course_name) }));
 
         res.json({ dining, pagoda });
     } catch (err) {
