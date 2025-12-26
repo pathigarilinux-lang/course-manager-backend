@@ -160,7 +160,23 @@ app.get('/courses/:id/participants', async (req, res) => { try { const result = 
 app.post('/participants', async (req, res) => { const { courseId, fullName, coursesInfo, email, age, gender, confNo } = req.body; try { const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)", [courseId, fullName]); if (check.rows.length > 0) return res.status(409).json({ error: "Student already exists." }); await pool.query("INSERT INTO participants (course_id, full_name, courses_info, email, age, gender, conf_no, status) VALUES ($1, $2, $3, $4, $5, $6, $7, 'No Response')", [courseId, fullName, coursesInfo, email, age, gender, confNo]); res.json({ message: "Student added" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/courses/:id/import', async (req, res) => { const { id } = req.params; const { students } = req.body; if (!students || !Array.isArray(students)) return res.status(400).json({ error: "Invalid data" }); let added = 0, skipped = 0; try { for (const s of students) { const name = s.name ? s.name.trim() : ""; if (name.length < 1) continue; const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND (LOWER(full_name) = LOWER($2) OR (conf_no IS NOT NULL AND conf_no = $3))", [id, name, s.confNo]); if (check.rows.length > 0) { skipped++; } else { await pool.query("INSERT INTO participants (course_id, full_name, phone_number, email, status, age, gender, courses_info, conf_no) VALUES ($1, $2, $3, $4, 'No Response', $5, $6, $7, $8)", [id, name, s.phone||'', s.email||'', s.age||null, s.gender||null, s.courses||null, s.confNo||null]); added++; } } res.json({ message: `Added: ${added}. Skipped: ${skipped}` }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.delete('/participants/:id', async (req, res) => { try { await pool.query("DELETE FROM participants WHERE participant_id = $1", [req.params.id]); res.json({ message: "Deleted successfully" }); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/expenses', async (req, res) => { const { courseId, participantId, type, amount } = req.body; try { const result = await pool.query("INSERT INTO expenses (course_id, participant_id, expense_type, amount) VALUES ($1, $2, $3, $4) RETURNING *", [courseId, participantId, type, amount]); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
+// ✅ REPLACEMENT ENDPOINT: Create Expense (With Date Support)
+app.post('/expenses', async (req, res) => { 
+    const { courseId, participantId, type, amount, date } = req.body; 
+    try { 
+        // If a date is provided, use it; otherwise default to NOW()
+        // We append current time to the date string to ensure sorting order remains correct
+        const recordDate = date ? `${date} 12:00:00` : new Date();
+
+        const result = await pool.query(
+            "INSERT INTO expenses (course_id, participant_id, expense_type, amount, recorded_at) VALUES ($1, $2, $3, $4, $5) RETURNING *", 
+            [courseId, participantId, type, amount, recordDate]
+        ); 
+        res.json(result.rows[0]); 
+    } catch (err) { 
+        res.status(500).json({ error: err.message }); 
+    } 
+});
 app.put('/expenses/:id', async (req, res) => { const { expense_type, amount } = req.body; try { const result = await pool.query("UPDATE expenses SET expense_type=$1, amount=$2 WHERE expense_id=$3 RETURNING *", [expense_type, amount, req.params.id]); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.delete('/expenses/:id', async (req, res) => { try { await pool.query("DELETE FROM expenses WHERE expense_id = $1", [req.params.id]); res.json({ message: "Expense deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.get('/participants/:id/expenses', async (req, res) => { try { const result = await pool.query("SELECT * FROM expenses WHERE participant_id = $1 ORDER BY recorded_at DESC", [req.params.id]); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
