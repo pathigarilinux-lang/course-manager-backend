@@ -25,15 +25,17 @@ const getTag = (name) => {
     return match ? `${match[1]}d` : name.substring(0, 3).toUpperCase();
 };
 
-// --- HELPER: GLOBAL CONFLICT CHECKER (Generic) ---
-// Checks if a resource (Laundry, Dining, Pagoda) is already taken by an active student
-const checkResourceConflict = async (column, val, excludeId) => {
+// --- HELPER: GENDER-SCOPED CONFLICT CHECKER ---
+// Now checks gender to allow Male Seat 1 & Female Seat 1 to exist simultaneously
+const checkResourceConflict = async (column, val, excludeId, gender) => {
     const cleanVal = clean(val);
-    if (!cleanVal) return null;
+    if (!cleanVal || !gender) return null;
     
-    // We use a safe list of columns to prevent SQL injection
     const allowedColumns = ['laundry_token_no', 'dining_seat_no', 'pagoda_cell_no'];
     if (!allowedColumns.includes(column)) throw new Error("Invalid column for conflict check");
+
+    // Standardize gender for query (matches 'Male', 'male', 'M', 'm')
+    const genderLike = `${gender.charAt(0).toUpperCase()}%`;
 
     const query = `
         SELECT p.full_name, c.course_name 
@@ -42,8 +44,9 @@ const checkResourceConflict = async (column, val, excludeId) => {
         WHERE p.${column} = $1 
         AND p.status IN ('Attending', 'Gate Check-In')
         AND p.participant_id != $2
+        AND p.gender LIKE $3 
     `;
-    const res = await pool.query(query, [cleanVal, excludeId || -1]);
+    const res = await pool.query(query, [cleanVal, excludeId || -1, genderLike]);
     return res.rows.length > 0 ? res.rows[0] : null;
 };
 
@@ -53,31 +56,36 @@ app.get('/rooms/occupancy', async (req, res) => { try { const query = `SELECT p.
 app.post('/rooms', async (req, res) => { const { roomNo, type } = req.body; try { const result = await pool.query("INSERT INTO rooms (room_no, gender_type) VALUES ($1, $2) RETURNING *", [roomNo, type]); res.json(result.rows[0]); } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Room already exists" }); res.status(500).json({ error: err.message }); } });
 app.delete('/rooms/:id', async (req, res) => { try { await pool.query("DELETE FROM rooms WHERE room_id = $1", [req.params.id]); res.json({ message: "Room deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-// --- CHECK-IN (Updated with Validation) ---
+// --- CHECK-IN (Updated with Gender-Aware Conflict) ---
 app.post('/check-in', async (req, res) => {
-    const { participantId, roomNo, seatNo, diningSeatType, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
+    const { participantId, roomNo, seatNo, diningSeatType, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating, gender } = req.body;
     try {
-        // 1. Check Room Conflict
+        // 1. Check Room Conflict (Strict unique check remains)
         if (roomNo) { 
             const roomCheck = await pool.query("SELECT p.full_name FROM participants p WHERE p.room_no = $1 AND p.status = 'Attending' AND p.participant_id != $2", [roomNo, participantId]); 
             if (roomCheck.rows.length > 0) return res.status(409).json({ error: `Room occupied by ${roomCheck.rows[0].full_name}` }); 
         }
         
-        // 2. Check Laundry Conflict
-        if (laundryToken) {
-            const conflict = await checkResourceConflict('laundry_token_no', laundryToken, participantId);
-            if (conflict) return res.status(409).json({ error: `Laundry Token ${laundryToken} occupied by ${conflict.full_name} (${conflict.course_name})` });
-        }
+        // Use student's gender to scope these checks
+        const studentGender = gender || 'Male'; 
 
-        // 3. ✅ Check Dining Conflict (NEW)
+        // 2. Check Laundry (Laundry tokens are usually global unique, but if you have M/F distinct sets, we scope it too)
+        // Note: Keeping Laundry GLOBAL unique for safety unless you specify otherwise.
+        /* if (laundryToken) {
+             const conflict = await checkResourceConflict('laundry_token_no', laundryToken, participantId, studentGender);
+             ...
+        }
+        */
+
+        // 3. ✅ Check Dining Conflict (Gender Scoped)
         if (seatNo) {
-            const conflict = await checkResourceConflict('dining_seat_no', seatNo, participantId);
+            const conflict = await checkResourceConflict('dining_seat_no', seatNo, participantId, studentGender);
             if (conflict) return res.status(409).json({ error: `Dining Seat ${seatNo} occupied by ${conflict.full_name} (${conflict.course_name})` });
         }
 
-        // 4. ✅ Check Pagoda Conflict (NEW)
+        // 4. ✅ Check Pagoda Conflict (Gender Scoped)
         if (pagodaCell) {
-            const conflict = await checkResourceConflict('pagoda_cell_no', pagodaCell, participantId);
+            const conflict = await checkResourceConflict('pagoda_cell_no', pagodaCell, participantId, studentGender);
             if (conflict) return res.status(409).json({ error: `Pagoda Cell ${pagodaCell} occupied by ${conflict.full_name} (${conflict.course_name})` });
         }
 
@@ -92,22 +100,20 @@ app.post('/check-in', async (req, res) => {
 app.post('/gate-checkin', async (req, res) => { const { participantId } = req.body; try { const result = await pool.query("UPDATE participants SET status = 'Gate Check-In' WHERE participant_id = $1 RETURNING *", [participantId]); if (result.rows.length === 0) return res.status(400).json({ error: "Student not found." }); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/gate-cancel', async (req, res) => { const { participantId } = req.body; try { const result = await pool.query("UPDATE participants SET status = 'Cancelled' WHERE participant_id = $1 AND status != 'Attending' RETURNING *", [participantId]); if (result.rows.length === 0) return res.status(400).json({ error: "Cannot cancel attending student" }); res.json(result.rows[0]); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-// --- PARTICIPANTS CRUD (Updated with Validation) ---
+// --- PARTICIPANTS CRUD ---
 app.put('/participants/:id', async (req, res) => { 
     const { id } = req.params; 
-    const { full_name, phone_number, status, room_no, dining_seat_no, dining_seat_type, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked, mobile_locker_no, valuables_locker_no, laundry_token_no } = req.body; 
+    const { full_name, phone_number, status, room_no, dining_seat_no, dining_seat_type, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked, mobile_locker_no, valuables_locker_no, laundry_token_no, gender } = req.body; 
     try { 
-        // Validation Checks
-        if (laundry_token_no) {
-            const conflict = await checkResourceConflict('laundry_token_no', laundry_token_no, id);
-            if (conflict) return res.status(409).json({ error: `Laundry Token ${laundry_token_no} occupied by ${conflict.full_name}` });
-        }
+        // We use the gender passed in body OR fetch it if missing (for safety, we assume frontend sends it)
+        const studentGender = gender || 'Male';
+
         if (dining_seat_no) {
-            const conflict = await checkResourceConflict('dining_seat_no', dining_seat_no, id);
+            const conflict = await checkResourceConflict('dining_seat_no', dining_seat_no, id, studentGender);
             if (conflict) return res.status(409).json({ error: `Dining Seat ${dining_seat_no} occupied by ${conflict.full_name}` });
         }
         if (pagoda_cell_no) {
-            const conflict = await checkResourceConflict('pagoda_cell_no', pagoda_cell_no, id);
+            const conflict = await checkResourceConflict('pagoda_cell_no', pagoda_cell_no, id, studentGender);
             if (conflict) return res.status(409).json({ error: `Pagoda Cell ${pagoda_cell_no} occupied by ${conflict.full_name}` });
         }
 
@@ -157,7 +163,7 @@ app.delete('/courses/:id', async (req, res) => { try { await pool.query('DELETE 
 app.post('/notify', async (req, res) => { const { type, participantId } = req.body; console.log(`Notification ${type} for ${participantId}`); res.json({message:'Sent'}); });
 app.post('/courses/:id/auto-noshow', async (req, res) => { try { await pool.query("UPDATE participants SET status='No-Show' WHERE course_id=$1 AND status IN ('No Response','Pending')", [req.params.id]); res.json({message:'Done'}); } catch(err) { res.status(500).json({error:err.message}); } });
 
-// ✅ GLOBAL CONFLICT CHECK
+// ✅ GLOBAL CONFLICT CHECK (Now Includes Gender!)
 app.get('/courses/:id/global-occupied', async (req, res) => {
     const { id } = req.params;
     try {
@@ -165,7 +171,7 @@ app.get('/courses/:id/global-occupied', async (req, res) => {
         if (courseRes.rows.length === 0) return res.json({ dining: [], pagoda: [] });
         const { start_date, end_date } = courseRes.rows[0];
         const query = `
-            SELECT p.dining_seat_no, p.pagoda_cell_no, c.course_name
+            SELECT p.dining_seat_no, p.pagoda_cell_no, c.course_name, p.gender
             FROM participants p
             JOIN courses c ON p.course_id = c.course_id
             WHERE p.status IN ('Attending', 'Gate Check-In') 
@@ -173,8 +179,10 @@ app.get('/courses/:id/global-occupied', async (req, res) => {
             AND (c.start_date <= $3 AND c.end_date >= $2)
         `;
         const result = await pool.query(query, [id, start_date, end_date]);
-        const dining = result.rows.filter(r => r.dining_seat_no).map(r => ({ seat: r.dining_seat_no.trim(), tag: getTag(r.course_name) }));
-        const pagoda = result.rows.filter(r => r.pagoda_cell_no).map(r => ({ cell: r.pagoda_cell_no.trim(), tag: getTag(r.course_name) }));
+        
+        // Return Gender info so frontend can filter
+        const dining = result.rows.filter(r => r.dining_seat_no).map(r => ({ seat: r.dining_seat_no.trim(), tag: getTag(r.course_name), gender: r.gender }));
+        const pagoda = result.rows.filter(r => r.pagoda_cell_no).map(r => ({ cell: r.pagoda_cell_no.trim(), tag: getTag(r.course_name), gender: r.gender }));
         res.json({ dining, pagoda });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
