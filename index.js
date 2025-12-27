@@ -201,4 +201,41 @@ app.get('/backup', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 const PORT = process.env.PORT || 3000;
+// --- AUTO-ALLOCATION (BULK SAVE) ---
+app.post('/accommodations/bulk-assign', async (req, res) => {
+    const { assignments } = req.body; // Expects array: [{ participantId: 1, roomNo: '101' }, ...]
+    
+    if (!assignments || !Array.isArray(assignments)) {
+        return res.status(400).json({ error: "Invalid data format" });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        let updatedCount = 0;
+        for (const item of assignments) {
+            // Safety check: Ensure room is still empty (concurrency)
+            const roomCheck = await client.query("SELECT participant_id FROM participants WHERE room_no = $1 AND status = 'Attending'", [item.roomNo]);
+            
+            if (roomCheck.rows.length === 0) {
+                // Update the student
+                await client.query(
+                    "UPDATE participants SET room_no = $1, status = 'Attending', process_stage = 4 WHERE participant_id = $2",
+                    [item.roomNo, item.participantId]
+                );
+                updatedCount++;
+            }
+        }
+
+        await client.query('COMMIT');
+        res.json({ message: `Successfully assigned ${updatedCount} students.` });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error("Bulk Assign Error:", err);
+        res.status(500).json({ error: "Bulk assignment failed." });
+    } finally {
+        client.release();
+    }
+});
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
