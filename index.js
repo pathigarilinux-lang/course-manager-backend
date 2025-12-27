@@ -26,7 +26,7 @@ const getTag = (name) => {
 };
 
 // --- HELPER: GENDER-SCOPED CONFLICT CHECKER ---
-// Now checks gender to allow Male Seat 1 & Female Seat 1 to exist simultaneously
+// Checks if a resource is taken by a student of the SAME gender.
 const checkResourceConflict = async (column, val, excludeId, gender) => {
     const cleanVal = clean(val);
     if (!cleanVal || !gender) return null;
@@ -34,8 +34,8 @@ const checkResourceConflict = async (column, val, excludeId, gender) => {
     const allowedColumns = ['laundry_token_no', 'dining_seat_no', 'pagoda_cell_no'];
     if (!allowedColumns.includes(column)) throw new Error("Invalid column for conflict check");
 
-    // Standardize gender for query (matches 'Male', 'male', 'M', 'm')
-    const genderLike = `${gender.charAt(0).toUpperCase()}%`;
+    // ILIKE for Case-Insensitive matching (Handles 'Male', 'male', 'M')
+    const genderLike = `${gender.charAt(0)}%`; 
 
     const query = `
         SELECT p.full_name, c.course_name 
@@ -44,7 +44,7 @@ const checkResourceConflict = async (column, val, excludeId, gender) => {
         WHERE p.${column} = $1 
         AND p.status IN ('Attending', 'Gate Check-In')
         AND p.participant_id != $2
-        AND p.gender LIKE $3 
+        AND p.gender ILIKE $3 
     `;
     const res = await pool.query(query, [cleanVal, excludeId || -1, genderLike]);
     return res.rows.length > 0 ? res.rows[0] : null;
@@ -56,34 +56,25 @@ app.get('/rooms/occupancy', async (req, res) => { try { const query = `SELECT p.
 app.post('/rooms', async (req, res) => { const { roomNo, type } = req.body; try { const result = await pool.query("INSERT INTO rooms (room_no, gender_type) VALUES ($1, $2) RETURNING *", [roomNo, type]); res.json(result.rows[0]); } catch (err) { if (err.code === '23505') return res.status(409).json({ error: "Room already exists" }); res.status(500).json({ error: err.message }); } });
 app.delete('/rooms/:id', async (req, res) => { try { await pool.query("DELETE FROM rooms WHERE room_id = $1", [req.params.id]); res.json({ message: "Room deleted" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-// --- CHECK-IN (Updated with Gender-Aware Conflict) ---
+// --- CHECK-IN ---
 app.post('/check-in', async (req, res) => {
     const { participantId, roomNo, seatNo, diningSeatType, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating, gender } = req.body;
     try {
-        // 1. Check Room Conflict (Strict unique check remains)
+        // 1. Check Room Conflict
         if (roomNo) { 
             const roomCheck = await pool.query("SELECT p.full_name FROM participants p WHERE p.room_no = $1 AND p.status = 'Attending' AND p.participant_id != $2", [roomNo, participantId]); 
             if (roomCheck.rows.length > 0) return res.status(409).json({ error: `Room occupied by ${roomCheck.rows[0].full_name}` }); 
         }
         
-        // Use student's gender to scope these checks
         const studentGender = gender || 'Male'; 
 
-        // 2. Check Laundry (Laundry tokens are usually global unique, but if you have M/F distinct sets, we scope it too)
-        // Note: Keeping Laundry GLOBAL unique for safety unless you specify otherwise.
-        /* if (laundryToken) {
-             const conflict = await checkResourceConflict('laundry_token_no', laundryToken, participantId, studentGender);
-             ...
-        }
-        */
-
-        // 3. ✅ Check Dining Conflict (Gender Scoped)
+        // 2. Check Dining Conflict (Gender Scoped)
         if (seatNo) {
             const conflict = await checkResourceConflict('dining_seat_no', seatNo, participantId, studentGender);
             if (conflict) return res.status(409).json({ error: `Dining Seat ${seatNo} occupied by ${conflict.full_name} (${conflict.course_name})` });
         }
 
-        // 4. ✅ Check Pagoda Conflict (Gender Scoped)
+        // 3. Check Pagoda Conflict (Gender Scoped)
         if (pagodaCell) {
             const conflict = await checkResourceConflict('pagoda_cell_no', pagodaCell, participantId, studentGender);
             if (conflict) return res.status(409).json({ error: `Pagoda Cell ${pagodaCell} occupied by ${conflict.full_name} (${conflict.course_name})` });
@@ -105,7 +96,6 @@ app.put('/participants/:id', async (req, res) => {
     const { id } = req.params; 
     const { full_name, phone_number, status, room_no, dining_seat_no, dining_seat_type, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked, mobile_locker_no, valuables_locker_no, laundry_token_no, gender } = req.body; 
     try { 
-        // We use the gender passed in body OR fetch it if missing (for safety, we assume frontend sends it)
         const studentGender = gender || 'Male';
 
         if (dining_seat_no) {
@@ -163,24 +153,22 @@ app.delete('/courses/:id', async (req, res) => { try { await pool.query('DELETE 
 app.post('/notify', async (req, res) => { const { type, participantId } = req.body; console.log(`Notification ${type} for ${participantId}`); res.json({message:'Sent'}); });
 app.post('/courses/:id/auto-noshow', async (req, res) => { try { await pool.query("UPDATE participants SET status='No-Show' WHERE course_id=$1 AND status IN ('No Response','Pending')", [req.params.id]); res.json({message:'Done'}); } catch(err) { res.status(500).json({error:err.message}); } });
 
-// ✅ GLOBAL CONFLICT CHECK (Now Includes Gender!)
+// ✅ GLOBAL CONFLICT CHECK (Simplified - No Dates, Gender Aware)
 app.get('/courses/:id/global-occupied', async (req, res) => {
     const { id } = req.params;
     try {
-        const courseRes = await pool.query("SELECT start_date, end_date FROM courses WHERE course_id = $1", [id]);
-        if (courseRes.rows.length === 0) return res.json({ dining: [], pagoda: [] });
-        const { start_date, end_date } = courseRes.rows[0];
+        // ✅ REMOVED COMPLEX DATE LOGIC. 
+        // Logic: If they are 'Attending' or 'Gate Check-In' in ANY active course, they occupy the resource.
         const query = `
             SELECT p.dining_seat_no, p.pagoda_cell_no, c.course_name, p.gender
             FROM participants p
             JOIN courses c ON p.course_id = c.course_id
             WHERE p.status IN ('Attending', 'Gate Check-In') 
             AND p.course_id != $1
-            AND (c.start_date <= $3 AND c.end_date >= $2)
         `;
-        const result = await pool.query(query, [id, start_date, end_date]);
+        const result = await pool.query(query, [id]);
         
-        // Return Gender info so frontend can filter
+        // Return active data (Gender included for scoped filtering on frontend)
         const dining = result.rows.filter(r => r.dining_seat_no).map(r => ({ seat: r.dining_seat_no.trim(), tag: getTag(r.course_name), gender: r.gender }));
         const pagoda = result.rows.filter(r => r.pagoda_cell_no).map(r => ({ cell: r.pagoda_cell_no.trim(), tag: getTag(r.course_name), gender: r.gender }));
         res.json({ dining, pagoda });
