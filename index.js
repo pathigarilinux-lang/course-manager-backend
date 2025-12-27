@@ -25,28 +25,20 @@ const getTag = (name) => {
     return match ? `${match[1]}d` : name.substring(0, 3).toUpperCase();
 };
 
-// --- HELPER: GENDER-SCOPED CONFLICT CHECKER ---
-// Checks if a resource is taken by a student of the SAME gender.
-const checkResourceConflict = async (column, val, excludeId, gender) => {
-    const cleanVal = clean(val);
-    if (!cleanVal || !gender) return null;
+// --- HELPER: GLOBAL LAUNDRY CHECK ---
+const checkGlobalLaundryDuplicate = async (token, excludeParticipantId) => {
+    const cleanToken = clean(token);
+    if (!cleanToken) return null;
     
-    const allowedColumns = ['laundry_token_no', 'dining_seat_no', 'pagoda_cell_no'];
-    if (!allowedColumns.includes(column)) throw new Error("Invalid column for conflict check");
-
-    // ILIKE for Case-Insensitive matching (Handles 'Male', 'male', 'M')
-    const genderLike = `${gender.charAt(0)}%`; 
-
     const query = `
         SELECT p.full_name, c.course_name 
         FROM participants p
         JOIN courses c ON p.course_id = c.course_id
-        WHERE p.${column} = $1 
+        WHERE p.laundry_token_no = $1 
         AND p.status IN ('Attending', 'Gate Check-In')
         AND p.participant_id != $2
-        AND p.gender ILIKE $3 
     `;
-    const res = await pool.query(query, [cleanVal, excludeId || -1, genderLike]);
+    const res = await pool.query(query, [cleanToken, excludeParticipantId || -1]);
     return res.rows.length > 0 ? res.rows[0] : null;
 };
 
@@ -58,28 +50,16 @@ app.delete('/rooms/:id', async (req, res) => { try { await pool.query("DELETE FR
 
 // --- CHECK-IN ---
 app.post('/check-in', async (req, res) => {
-    const { participantId, roomNo, seatNo, diningSeatType, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating, gender } = req.body;
+    const { participantId, roomNo, seatNo, diningSeatType, laundryToken, mobileLocker, valuablesLocker, language, pagodaCell, laptop, confNo, dhammaSeat, specialSeating } = req.body;
     try {
-        // 1. Check Room Conflict
         if (roomNo) { 
             const roomCheck = await pool.query("SELECT p.full_name FROM participants p WHERE p.room_no = $1 AND p.status = 'Attending' AND p.participant_id != $2", [roomNo, participantId]); 
             if (roomCheck.rows.length > 0) return res.status(409).json({ error: `Room occupied by ${roomCheck.rows[0].full_name}` }); 
         }
-        
-        const studentGender = gender || 'Male'; 
-
-        // 2. Check Dining Conflict (Gender Scoped)
-        if (seatNo) {
-            const conflict = await checkResourceConflict('dining_seat_no', seatNo, participantId, studentGender);
-            if (conflict) return res.status(409).json({ error: `Dining Seat ${seatNo} occupied by ${conflict.full_name} (${conflict.course_name})` });
+        if (laundryToken) {
+            const conflict = await checkGlobalLaundryDuplicate(laundryToken, participantId);
+            if (conflict) return res.status(409).json({ error: `Laundry Token ${laundryToken} is already assigned to ${conflict.full_name} (${conflict.course_name}).` });
         }
-
-        // 3. Check Pagoda Conflict (Gender Scoped)
-        if (pagodaCell) {
-            const conflict = await checkResourceConflict('pagoda_cell_no', pagodaCell, participantId, studentGender);
-            if (conflict) return res.status(409).json({ error: `Pagoda Cell ${pagodaCell} occupied by ${conflict.full_name} (${conflict.course_name})` });
-        }
-
         const query = `UPDATE participants SET status = 'Attending', process_stage = 4, room_no = $1, dining_seat_no = $2, laundry_token_no = $3, mobile_locker_no = $4, valuables_locker_no = $5, discourse_language = $6, pagoda_cell_no = $7, laptop_details = $8, conf_no = $9, dhamma_hall_seat_no = $10, special_seating = $11, dining_seat_type = $12 WHERE participant_id = $13 RETURNING *;`;
         const values = [ clean(roomNo), clean(seatNo), clean(laundryToken), clean(mobileLocker), clean(valuablesLocker), language||'English', clean(pagodaCell), laptop, clean(confNo), clean(dhammaSeat), clean(specialSeating), diningSeatType, participantId ];
         const result = await pool.query(query, values);
@@ -94,19 +74,12 @@ app.post('/gate-cancel', async (req, res) => { const { participantId } = req.bod
 // --- PARTICIPANTS CRUD ---
 app.put('/participants/:id', async (req, res) => { 
     const { id } = req.params; 
-    const { full_name, phone_number, status, room_no, dining_seat_no, dining_seat_type, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked, mobile_locker_no, valuables_locker_no, laundry_token_no, gender } = req.body; 
+    const { full_name, phone_number, status, room_no, dining_seat_no, dining_seat_type, pagoda_cell_no, conf_no, dhamma_hall_seat_no, special_seating, discourse_language, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked, mobile_locker_no, valuables_locker_no, laundry_token_no } = req.body; 
     try { 
-        const studentGender = gender || 'Male';
-
-        if (dining_seat_no) {
-            const conflict = await checkResourceConflict('dining_seat_no', dining_seat_no, id, studentGender);
-            if (conflict) return res.status(409).json({ error: `Dining Seat ${dining_seat_no} occupied by ${conflict.full_name}` });
+        if (laundry_token_no) {
+            const conflict = await checkGlobalLaundryDuplicate(laundry_token_no, id);
+            if (conflict) return res.status(409).json({ error: `Laundry Token ${laundry_token_no} is already assigned to ${conflict.full_name} (${conflict.course_name}).` });
         }
-        if (pagoda_cell_no) {
-            const conflict = await checkResourceConflict('pagoda_cell_no', pagoda_cell_no, id, studentGender);
-            if (conflict) return res.status(409).json({ error: `Pagoda Cell ${pagoda_cell_no} occupied by ${conflict.full_name}` });
-        }
-
         const result = await pool.query( `UPDATE participants SET full_name=$1, phone_number=$2, status=$3, room_no=$4, dining_seat_no=$5, pagoda_cell_no=$6, conf_no=$7, dhamma_hall_seat_no=$8, special_seating=$9, discourse_language=$10, dining_seat_type=$11, evening_food=$12, medical_info=$13, teacher_notes=$14, process_stage=$15, token_number=$16, is_seat_locked=$17, mobile_locker_no=$19, valuables_locker_no=$20, laundry_token_no=$21 WHERE participant_id=$18 RETURNING *`, [full_name, phone_number, status, clean(room_no), clean(dining_seat_no), clean(pagoda_cell_no), clean(conf_no), clean(dhamma_hall_seat_no), clean(special_seating), discourse_language, dining_seat_type, evening_food, medical_info, teacher_notes, process_stage, token_number, is_seat_locked || false, id, clean(mobile_locker_no), clean(valuables_locker_no), clean(laundry_token_no)] ); 
         res.json(result.rows[0]); 
     } catch (err) { res.status(500).json({ error: err.message }); } 
@@ -119,7 +92,68 @@ app.put('/courses/:id', async (req, res) => { const { id } = req.params; const {
 app.get('/courses/:id/stats', async (req, res) => { try { const result = await pool.query("SELECT status, conf_no, gender FROM participants WHERE course_id = $1", [req.params.id]); const stats = { attending: 0, gate_checkin: 0, no_response: 0, cancelled: 0, om: 0, of: 0, nm: 0, nf: 0, sm: 0, sf: 0, attending_m: 0, attending_f: 0, gate_m: 0, gate_f: 0, pending_m: 0, pending_f: 0, languages: [] }; result.rows.forEach(p => { const isMale = p.gender && p.gender.toLowerCase() === 'male'; if (p.status === 'Attending' || p.status === 'Arrived') { stats.attending++; if(isMale) stats.attending_m++; else stats.attending_f++; if (p.conf_no) { const code = p.conf_no.trim().toUpperCase(); if (code.startsWith('O')) stats.om++; else if (code.startsWith('N')) stats.nm++; else if (code.startsWith('S')) stats.sm++; } } else if (p.status === 'Gate Check-In') { stats.gate_checkin++; if(isMale) stats.gate_m++; else stats.gate_f++; } else if (p.status === 'No Response') { stats.no_response++; if(isMale) stats.pending_m++; else stats.pending_f++; } else if (p.status === 'Cancelled') { stats.cancelled++; } }); const langResult = await pool.query("SELECT discourse_language, COUNT(*) as total, COUNT(CASE WHEN LOWER(gender) = 'male' THEN 1 END)::int as male_count, COUNT(CASE WHEN LOWER(gender) = 'female' THEN 1 END)::int as female_count FROM participants WHERE course_id = $1 AND status = 'Attending' GROUP BY discourse_language ORDER BY total DESC", [req.params.id]); stats.languages = langResult.rows; res.json(stats); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.get('/courses/:id/participants', async (req, res) => { try { const result = await pool.query("SELECT * FROM participants WHERE course_id = $1 ORDER BY full_name ASC", [req.params.id]); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/participants', async (req, res) => { const { courseId, fullName, coursesInfo, email, age, gender, confNo } = req.body; try { const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)", [courseId, fullName]); if (check.rows.length > 0) return res.status(409).json({ error: "Student already exists." }); await pool.query("INSERT INTO participants (course_id, full_name, courses_info, email, age, gender, conf_no, status) VALUES ($1, $2, $3, $4, $5, $6, $7, 'No Response')", [courseId, fullName, coursesInfo, email, age, gender, confNo]); res.json({ message: "Student added" }); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/courses/:id/import', async (req, res) => { const { id } = req.params; const { students } = req.body; if (!students || !Array.isArray(students)) return res.status(400).json({ error: "Invalid data" }); let added = 0, skipped = 0; try { for (const s of students) { const name = s.name ? s.name.trim() : ""; if (name.length < 1) continue; const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND (LOWER(full_name) = LOWER($2) OR (conf_no IS NOT NULL AND conf_no = $3))", [id, name, s.confNo]); if (check.rows.length > 0) { skipped++; } else { await pool.query("INSERT INTO participants (course_id, full_name, phone_number, email, status, age, gender, courses_info, conf_no) VALUES ($1, $2, $3, $4, 'No Response', $5, $6, $7, $8)", [id, name, s.phone||'', s.email||'', s.age||null, s.gender||null, s.courses||null, s.confNo||null]); added++; } } res.json({ message: `Added: ${added}. Skipped: ${skipped}` }); } catch (err) { res.status(500).json({ error: err.message }); } });
+
+// --- ✅ SAFE IMPORT ENDPOINT (Does Not Overwrite) ---
+app.post('/courses/:id/import', async (req, res) => {
+    const { id } = req.params;
+    const { students } = req.body; // Array of student objects
+
+    const client = await pool.connect();
+    
+    try {
+        await client.query('BEGIN');
+        
+        let addedCount = 0;
+        let skippedCount = 0;
+
+        for (const s of students) {
+            // 1. CHECK: Does this ConfNo already exist for this Course?
+            const checkRes = await client.query(
+                `SELECT participant_id FROM participants 
+                 WHERE course_id = $1 AND conf_no = $2`,
+                [id, s.confNo]
+            );
+
+            if (checkRes.rows.length > 0) {
+                // 🛑 EXISTS: Skip to preserve existing data (Room, Status, etc.)
+                skippedCount++;
+            } else {
+                // ✅ NEW: Insert
+                await client.query(
+                    `INSERT INTO participants 
+                    (course_id, full_name, age, gender, conf_no, courses_info, email, phone, status, notes)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Confirmed', $9)`,
+                    [
+                        id, 
+                        s.name, 
+                        s.age || 0, 
+                        s.gender, 
+                        s.confNo, 
+                        s.courses, 
+                        s.email || '', 
+                        s.phone || '',
+                        s.notes || ''
+                    ]
+                );
+                addedCount++;
+            }
+        }
+
+        await client.query('COMMIT');
+        res.json({ 
+            message: `Import Complete`, 
+            details: `Added ${addedCount} new students. Skipped ${skippedCount} existing.` 
+        });
+
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err);
+        res.status(500).json({ error: "Import failed" });
+    } finally {
+        client.release();
+    }
+});
+
 app.delete('/participants/:id', async (req, res) => { try { await pool.query("DELETE FROM participants WHERE participant_id = $1", [req.params.id]); res.json({ message: "Deleted successfully" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
 // --- EXPENSES ---
@@ -153,29 +187,29 @@ app.delete('/courses/:id', async (req, res) => { try { await pool.query('DELETE 
 app.post('/notify', async (req, res) => { const { type, participantId } = req.body; console.log(`Notification ${type} for ${participantId}`); res.json({message:'Sent'}); });
 app.post('/courses/:id/auto-noshow', async (req, res) => { try { await pool.query("UPDATE participants SET status='No-Show' WHERE course_id=$1 AND status IN ('No Response','Pending')", [req.params.id]); res.json({message:'Done'}); } catch(err) { res.status(500).json({error:err.message}); } });
 
-// ✅ GLOBAL CONFLICT CHECK (Simplified - No Dates, Gender Aware)
+// ✅ GLOBAL CONFLICT CHECK
 app.get('/courses/:id/global-occupied', async (req, res) => {
     const { id } = req.params;
     try {
-        // ✅ REMOVED COMPLEX DATE LOGIC. 
-        // Logic: If they are 'Attending' or 'Gate Check-In' in ANY active course, they occupy the resource.
+        const courseRes = await pool.query("SELECT start_date, end_date FROM courses WHERE course_id = $1", [id]);
+        if (courseRes.rows.length === 0) return res.json({ dining: [], pagoda: [] });
+        const { start_date, end_date } = courseRes.rows[0];
         const query = `
-            SELECT p.dining_seat_no, p.pagoda_cell_no, c.course_name, p.gender
+            SELECT p.dining_seat_no, p.pagoda_cell_no, c.course_name
             FROM participants p
             JOIN courses c ON p.course_id = c.course_id
             WHERE p.status IN ('Attending', 'Gate Check-In') 
             AND p.course_id != $1
+            AND (c.start_date <= $3 AND c.end_date >= $2)
         `;
-        const result = await pool.query(query, [id]);
-        
-        // Return active data (Gender included for scoped filtering on frontend)
-        const dining = result.rows.filter(r => r.dining_seat_no).map(r => ({ seat: r.dining_seat_no.trim(), tag: getTag(r.course_name), gender: r.gender }));
-        const pagoda = result.rows.filter(r => r.pagoda_cell_no).map(r => ({ cell: r.pagoda_cell_no.trim(), tag: getTag(r.course_name), gender: r.gender }));
+        const result = await pool.query(query, [id, start_date, end_date]);
+        const dining = result.rows.filter(r => r.dining_seat_no).map(r => ({ seat: r.dining_seat_no.trim(), tag: getTag(r.course_name) }));
+        const pagoda = result.rows.filter(r => r.pagoda_cell_no).map(r => ({ cell: r.pagoda_cell_no.trim(), tag: getTag(r.course_name) }));
         res.json({ dining, pagoda });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ✅ FULL DATABASE BACKUP
+// ✅ NEW: FULL DATABASE BACKUP ENDPOINT
 app.get('/backup', async (req, res) => {
     try {
         const courses = await pool.query("SELECT * FROM courses");
@@ -201,41 +235,4 @@ app.get('/backup', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Backend is Live!'));
 const PORT = process.env.PORT || 3000;
-// --- AUTO-ALLOCATION (BULK SAVE) ---
-app.post('/accommodations/bulk-assign', async (req, res) => {
-    const { assignments } = req.body; // Expects array: [{ participantId: 1, roomNo: '101' }, ...]
-    
-    if (!assignments || !Array.isArray(assignments)) {
-        return res.status(400).json({ error: "Invalid data format" });
-    }
-
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        
-        let updatedCount = 0;
-        for (const item of assignments) {
-            // Safety check: Ensure room is still empty (concurrency)
-            const roomCheck = await client.query("SELECT participant_id FROM participants WHERE room_no = $1 AND status = 'Attending'", [item.roomNo]);
-            
-            if (roomCheck.rows.length === 0) {
-                // Update the student
-                await client.query(
-                    "UPDATE participants SET room_no = $1, status = 'Attending', process_stage = 4 WHERE participant_id = $2",
-                    [item.roomNo, item.participantId]
-                );
-                updatedCount++;
-            }
-        }
-
-        await client.query('COMMIT');
-        res.json({ message: `Successfully assigned ${updatedCount} students.` });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        console.error("Bulk Assign Error:", err);
-        res.status(500).json({ error: "Bulk assignment failed." });
-    } finally {
-        client.release();
-    }
-});
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
