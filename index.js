@@ -12,6 +12,30 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// --- ✅ NEW: AUTHENTICATION ENDPOINT ---
+app.post('/login', async (req, res) => {
+    const { username, password } = req.body;
+    try {
+        // Query the 'app_users' table created in Step 1
+        const result = await pool.query('SELECT * FROM app_users WHERE username = $1', [username]);
+        
+        if (result.rows.length > 0) {
+            const user = result.rows[0];
+            // In production, use bcrypt for password hashing. For now, plain text match.
+            if (user.password === password) {
+                res.json({ username: user.username, role: user.role });
+            } else {
+                res.status(401).json({ error: "Invalid credentials" });
+            }
+        } else {
+            res.status(401).json({ error: "User not found" });
+        }
+    } catch (err) {
+        console.error("Login Error:", err);
+        res.status(500).json({ error: "Server error during login" });
+    }
+});
+
 // --- UTILS ---
 const clean = (val) => {
     if (!val) return null;
@@ -93,11 +117,10 @@ app.get('/courses/:id/stats', async (req, res) => { try { const result = await p
 app.get('/courses/:id/participants', async (req, res) => { try { const result = await pool.query("SELECT * FROM participants WHERE course_id = $1 ORDER BY full_name ASC", [req.params.id]); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.post('/participants', async (req, res) => { const { courseId, fullName, coursesInfo, email, age, gender, confNo } = req.body; try { const check = await pool.query("SELECT participant_id FROM participants WHERE course_id = $1 AND LOWER(full_name) = LOWER($2)", [courseId, fullName]); if (check.rows.length > 0) return res.status(409).json({ error: "Student already exists." }); await pool.query("INSERT INTO participants (course_id, full_name, courses_info, email, age, gender, conf_no, status) VALUES ($1, $2, $3, $4, $5, $6, $7, 'No Response')", [courseId, fullName, coursesInfo, email, age, gender, confNo]); res.json({ message: "Student added" }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-// --- ✅ SAFE IMPORT ENDPOINT (Does Not Overwrite) ---
-// --- ✅ SAFE IMPORT ENDPOINT (Corrected Column Names) ---
+// --- SAFE IMPORT ENDPOINT (Does Not Overwrite) ---
 app.post('/courses/:id/import', async (req, res) => {
     const { id } = req.params;
-    const { students } = req.body; // Array of student objects
+    const { students } = req.body; 
 
     const client = await pool.connect();
     
@@ -108,7 +131,6 @@ app.post('/courses/:id/import', async (req, res) => {
         let skippedCount = 0;
 
         for (const s of students) {
-            // 1. CHECK: Does this ConfNo already exist for this Course?
             const checkRes = await client.query(
                 `SELECT participant_id FROM participants 
                  WHERE course_id = $1 AND conf_no = $2`,
@@ -116,10 +138,8 @@ app.post('/courses/:id/import', async (req, res) => {
             );
 
             if (checkRes.rows.length > 0) {
-                // 🛑 EXISTS: Skip to preserve existing data
                 skippedCount++;
             } else {
-                // ✅ NEW: Insert (Fixed 'notes' -> 'teacher_notes')
                 await client.query(
                     `INSERT INTO participants 
                     (course_id, full_name, age, gender, conf_no, courses_info, email, phone_number, status, teacher_notes)
@@ -127,13 +147,13 @@ app.post('/courses/:id/import', async (req, res) => {
                     [
                         id, 
                         s.name, 
-                        parseInt(s.age) || 0, // Ensure numeric
+                        parseInt(s.age) || 0, 
                         s.gender, 
                         s.confNo, 
                         s.courses, 
                         s.email || '', 
-                        s.phone || '', // Mapped to phone_number
-                        s.notes || ''  // Mapped to teacher_notes
+                        s.phone || '', 
+                        s.notes || '' 
                     ]
                 );
                 addedCount++;
@@ -148,7 +168,7 @@ app.post('/courses/:id/import', async (req, res) => {
 
     } catch (err) {
         await client.query('ROLLBACK');
-        console.error("Import Error:", err.message); // Logs specific error to console
+        console.error("Import Error:", err.message); 
         res.status(500).json({ error: "Import failed: " + err.message });
     } finally {
         client.release();
