@@ -13,28 +13,29 @@ const pool = new Pool({
 });
 
 // --- ✅ NEW: AUTHENTICATION ENDPOINT ---
-app.post('/login', async (req, res) => {
-    const { username, password } = req.body;
+// ... existing /login endpoint ...
+
+// ✅ NEW: PASSCODE LOGIN ENDPOINT
+app.post('/login-passcode', async (req, res) => {
+    const { passcode } = req.body;
     try {
-        // Query the 'app_users' table created in Step 1
-        const result = await pool.query('SELECT * FROM app_users WHERE username = $1', [username]);
+        // Find user where the password column matches the passcode
+        // Note: Passcodes must be unique per user for this to work correctly
+        const result = await pool.query('SELECT * FROM app_users WHERE password = $1', [passcode]);
         
         if (result.rows.length > 0) {
             const user = result.rows[0];
-            // In production, use bcrypt for password hashing. For now, plain text match.
-            if (user.password === password) {
-                res.json({ username: user.username, role: user.role });
-            } else {
-                res.status(401).json({ error: "Invalid credentials" });
-            }
+            res.json({ username: user.username, role: user.role });
         } else {
-            res.status(401).json({ error: "User not found" });
+            res.status(401).json({ error: "Invalid Passcode" });
         }
     } catch (err) {
-        console.error("Login Error:", err);
-        res.status(500).json({ error: "Server error during login" });
+        console.error("Passcode Login Error:", err);
+        res.status(500).json({ error: "Server error" });
     }
 });
+
+// ... rest of the file ...
 
 // --- UTILS ---
 const clean = (val) => {
